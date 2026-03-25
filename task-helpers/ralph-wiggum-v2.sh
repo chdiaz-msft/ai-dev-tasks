@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure Windows-installed CLIs (e.g. claude via WinGet) are on PATH
+export PATH="$PATH:/c/Users/$USER/AppData/Local/Microsoft/WinGet/Links"
+
 # ralph-wiggum.sh — Sequential task executor using Claude Code headless mode
 #
 # Usage: ./ralph-wiggum.sh <tasks.md> [options]
@@ -155,36 +158,36 @@ TASK_PARSER="$SCRIPT_DIR/task_parser.py"
 #   parent_text: text of the parent task (empty if top-level)
 #   task_text:   text of the subtask itself
 get_next_task() {
-  uv run "$TASK_PARSER" next-task "$TASKS_FILE"
+  python3 "$TASK_PARSER" next-task "$TASKS_FILE"
 }
 
 # Mark a task as failed by line number and description (for stable addressing)
 mark_task_failed() {
   local line_num="$1"
   local task_desc="$2"
-  uv run "$TASK_PARSER" mark-failed "$TASKS_FILE" --line "$line_num" --match "$task_desc"
+  python3 "$TASK_PARSER" mark-failed "$TASKS_FILE" --line "$line_num" --match "$task_desc"
 }
 
 # Check if a specific line is now marked complete [x]
 is_task_marked_complete() {
   local line_num="$1"
   local task_desc="$2"
-  uv run "$TASK_PARSER" is-complete "$TASKS_FILE" --line "$line_num" --match "$task_desc"
+  python3 "$TASK_PARSER" is-complete "$TASKS_FILE" --line "$line_num" --match "$task_desc"
 }
 
 # Auto-complete parent tasks whose subtasks are all [x]
 auto_complete_parents() {
-  uv run "$TASK_PARSER" auto-complete-parents "$TASKS_FILE"
+  python3 "$TASK_PARSER" auto-complete-parents "$TASKS_FILE"
 }
 
 # Extract the verification section content (supports h1, h2, h3 headers)
 get_verification_section() {
-  uv run "$TASK_PARSER" verification-section "$TASKS_FILE"
+  python3 "$TASK_PARSER" verification-section "$TASKS_FILE"
 }
 
 # Count total and completed tasks (leaves only)
 count_tasks() {
-  uv run "$TASK_PARSER" count "$TASKS_FILE"
+  python3 "$TASK_PARSER" count "$TASKS_FILE"
 }
 
 # ── Run Claude headless ──────────────────────────────────────────────────────
