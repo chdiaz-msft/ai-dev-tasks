@@ -21,7 +21,7 @@ To guide an AI assistant in creating a detailed, step-by-step task list in Markd
 2.  **Analyze PRD:** The AI reads and analyzes the functional requirements, user stories, and other sections of the specified PRD.
 3.  **Phase 1: Generate Parent Tasks:** Based on the PRD analysis, create the file and generate the main, high-level tasks required to implement the feature. Use your judgement on how many high-level tasks to use. It's likely to be about 5. Present these tasks to the user in the specified format (without sub-tasks yet). Inform the user: "I have generated the high-level tasks based on the PRD. Ready to generate the sub-tasks? Respond with 'Go' to proceed."
 4.  **Wait for Confirmation:** Pause and wait for the user to respond with "Go".
-5.  **Phase 2: Generate Sub-Tasks:** Once the user confirms, break down each parent task into smaller, actionable sub-tasks necessary to complete the parent task. **Follow a TDD approach: for each parent task, generate the test-writing sub-tasks first, then the implementation sub-tasks.** The test sub-tasks should define the expected behavior (inputs, outputs, edge cases) derived from the PRD before any implementation code is written. Ensure sub-tasks logically follow from the parent task and cover the implementation details implied by the PRD.
+5.  **Phase 2: Generate Sub-Tasks:** Once the user confirms, break down each parent task into smaller, actionable sub-tasks necessary to complete the parent task. **Follow a TDD approach: for each parent task, generate the test-writing sub-tasks first, then a dedicated "run tests to confirm they fail" sub-task, then the implementation sub-tasks.** The test sub-tasks should define the expected behavior (inputs, outputs, edge cases) derived from the PRD before any implementation code is written. The "run tests to confirm they fail" step validates that tests are non-trivial and actually test new behavior. Ensure sub-tasks logically follow from the parent task and cover the implementation details implied by the PRD.
 6.  **Identify Relevant Files:** Based on the tasks and PRD, identify potential files that will need to be created or modified. List these under the `Relevant Files` section, including corresponding test files if applicable.
 7.  **Generate Verification Criteria:** Based on the PRD's acceptance criteria and the tasks generated, write a `## Verification Criteria` section at the bottom of the document. Each criterion should be a concrete, observable check (e.g., a command to run, a scenario to test, or a behavior to confirm) that proves the feature works as specified. Use checkboxes (`- [ ]`) so they can be marked off during review.
 8.  **Generate Final Output:** Combine the parent tasks, sub-tasks, relevant files, notes, and verification criteria into the final Markdown structure.
@@ -51,12 +51,14 @@ The generated task list _must_ follow this structure:
 
 - [ ] 1.0 Parent Task Title
   - [ ] 1.1 Write tests for [feature/component] (define expected behavior, inputs, outputs, and edge cases)
-  - [ ] 1.2 Run tests to confirm they fail (red phase)
+  - [ ] 1.2 Run tests to confirm they fail (red phase — validates tests are non-trivial)
   - [ ] 1.3 Implement [feature/component] to make tests pass (green phase)
   - [ ] 1.4 Refactor if needed while keeping tests green
 - [ ] 2.0 Parent Task Title
   - [ ] 2.1 Write tests for [feature/component]
-  - [ ] 2.2 Implement [feature/component] to make tests pass
+  - [ ] 2.2 Run tests to confirm they fail (red phase — validates tests are non-trivial)
+  - [ ] 2.3 Implement [feature/component] to make tests pass (green phase)
+  - [ ] 2.4 Refactor if needed while keeping tests green
 - [ ] 3.0 Parent Task Title (may not require sub-tasks if purely structural or configuration)
 
 ## Verification Criteria
@@ -81,6 +83,8 @@ Each parent task should follow the **Red-Green-Refactor** cycle:
 3. **Refactor:** Clean up the implementation while ensuring all tests remain green.
 
 Sub-tasks within each parent task must be ordered so that **all test-writing sub-tasks come before any implementation sub-tasks**. This ensures the developer never writes implementation code without a failing test to guide it.
+
+**Every parent task that includes tests MUST have an explicit "Run tests to confirm they fail" sub-task between writing tests and writing implementation.** This step validates that the tests are non-trivial — a test that passes before any implementation code is written is testing nothing meaningful. Never skip this step or combine it with the test-writing step.
 
 ## Target Audience
 

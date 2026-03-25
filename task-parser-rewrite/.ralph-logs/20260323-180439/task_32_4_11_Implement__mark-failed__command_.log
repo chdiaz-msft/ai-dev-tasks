@@ -1,0 +1,30 @@
+Perfect! The implementation is complete and working. Let me provide a summary:
+
+## Summary
+
+I have successfully implemented the `mark-failed` command for the task parser (task 4.11). Here's what was done:
+
+### Implementation Details:
+1. **Completed the `cmd_mark_failed` function** in `task-helpers/task_parser.py` (lines 783-850)
+   - The function reads the task file
+   - Uses the existing `resolve_task` function for stable addressing (supporting line numbers and substring matching)
+   - Modifies the checkbox status from `[ ]`, `[]`, `[x]`, `[X]`, or `[!]` to `[!]`
+   - Preserves exact indentation and line endings
+   - Uses atomic write operations via `atomic_write()` to prevent file corruption
+   - Proper error handling with exit codes (0 for success, 3 for errors)
+
+2. **The implementation follows the same pattern as `mark-complete`**, ensuring consistency across the codebase
+
+3. **All 18 tests are passing**, including:
+   - Basic functionality tests (changing various checkbox formats to `[!]`)
+   - Stable addressing tests (line number with verification, substring matching, drift recovery)
+   - Edge cases (already failed tasks, preserving indentation, atomic writes)
+   - Error cases (multiple matches, zero matches, file not found)
+
+4. **Updated the task file**:
+   - Marked task 4.11 as complete `[x]`
+   - Updated the "Relevant Files" section to document the mark-failed command implementation
+
+The parent task (4.0) remains incomplete as there are still 3 sibling subtasks to complete (4.12, 4.13, and 4.14).
+
+TASK_STATUS: COMPLETE — Implemented mark-failed command with stable addressing and atomic writes, all 18 tests passing

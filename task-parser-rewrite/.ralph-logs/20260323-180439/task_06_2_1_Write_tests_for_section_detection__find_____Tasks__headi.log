@@ -1,0 +1,23 @@
+Excellent! All 11 tests are collected and ready. Let me create a summary of what was accomplished:
+
+## Summary
+
+I have successfully written comprehensive tests for section detection according to task 2.1. The tests cover:
+
+1. **H1-H3 heading detection**: Tests for `# Tasks`, `## Tasks`, and `### Tasks` headings
+2. **Case-insensitive matching**: Tests for TASKS, tasks, TaSks, etc.
+3. **Boundary detection**: 
+   - Stop at equal-level heading (## stops at ##)
+   - Stop at higher-level heading (### stops at ##)
+   - Continue past lower-level headings (## continues past ###)
+   - Extend to EOF when no equal-or-higher heading follows
+4. **Edge cases**:
+   - No Tasks section found (returns None)
+   - Tasks inside code blocks (should be ignored)
+   - Tasks section with no tasks in it
+
+All 11 tests are properly failing with `AttributeError: module 'task_parser' has no attribute 'find_tasks_section'`, confirming we're in the red phase of TDD. The tests validate that the implementation is non-trivial and will need actual functionality to pass.
+
+The task has been marked as complete in the task file, and the "Relevant Files" section has been updated.
+
+TASK_STATUS: COMPLETE — Wrote 11 comprehensive tests for section detection covering h1-h3 headings, case-insensitivity, boundary detection, and edge cases; tests confirmed failing (red phase)

@@ -1,0 +1,41 @@
+Perfect! Let me create a summary of what I've done:
+
+## Summary
+
+I successfully implemented comprehensive tests for the `next-task` command as specified in task 3.1. The tests verify that the command:
+
+### Key Test Coverage:
+
+1. **Output Format**: Returns pipe-delimited output in format `line_num|parent_text|task_text` (3 fields)
+
+2. **Task Selection Logic**:
+   - Finds the first incomplete leaf task in document order
+   - Skips completed tasks `[x]` and `[X]`
+   - Skips failed tasks `[!]`
+   - Skips parent tasks (non-leaf tasks with children)
+   - Handles flat task lists and deeply nested structures
+
+3. **Exit Codes**:
+   - Exits 1 when no incomplete tasks remain
+   - Exits 1 when no Tasks section exists
+   - Exits 1 when only parent tasks are incomplete (no incomplete leaves)
+   - Exits with error when file doesn't exist
+
+4. **Edge Cases**:
+   - Multiple parent levels (grandparent → parent → child)
+   - Mixed checkbox formats `[ ]`, `[]`, `[x]`, `[X]`, `[!]`
+   - Tasks with empty descriptions
+   - Root-level leaf tasks (parent_text should be empty)
+   - Tasks inside code blocks (should be ignored)
+   - Tasks with special characters and pipe characters in descriptions
+
+### Test Results:
+- Created 21 comprehensive test cases in the `TestNextTaskCommandFunctionality` class
+- Tests confirmed to fail (16 failed, 5 passed) - validating they are non-trivial and properly test the not-yet-implemented functionality (red phase of TDD)
+- Test file location: `task-helpers/tests/test_task_parser.py:1792-2279`
+
+### Files Updated:
+1. `task-helpers/tests/test_task_parser.py` - Added comprehensive next-task command tests
+2. `task-parser-rewrite/tasks-prd-task-parser-rewrite.md` - Marked task 3.1 as complete [x] and updated Relevant Files section
+
+TASK_STATUS: COMPLETE — Added 21 comprehensive tests for next-task command verifying pipe-delimited output format, task selection logic, exit codes, and edge cases; tests confirmed to fail (red phase of TDD)
