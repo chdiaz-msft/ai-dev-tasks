@@ -1,0 +1,25 @@
+[0;34m[ralph][0m (dry run) Would send to Claude:
+
+You are working through a task list. The full plan is in @/c/git/jacob-ai-dev-tasks/task-parser-rewrite/tasks-prd-task-parser-rewrite.md — read it for context.
+
+This subtask belongs to the parent task group:
+  6.0 End-to-end validation against existing task files and integration testing
+
+Your job right now is to implement ONLY the following subtask:
+
+  6.6 Fix any parsing edge cases discovered during integration testing
+
+Instructions:
+1. Before starting, evaluate whether this task is something you can actually perform as a software engineering agent. You can write code, edit files, run commands, search codebases, and interact with development tools. You CANNOT perform physical actions, interact with the real world, access external accounts/services you have no credentials for, or do anything outside your capabilities as a coding assistant. If the task is not something you can perform, report BLOCKED immediately — do NOT pretend to complete it or mark it [x].
+2. Implement this subtask completely.
+3. When done, mark it as completed by changing `[ ]` to `[x]` in the task file.
+4. If ALL sibling subtasks under the parent are now `[x]`, also mark the parent task `[x]`.
+5. Update the "Relevant Files" section in the task file with any files you created or modified.
+6. Do NOT work on any other tasks. Focus exclusively on this one.
+
+IMPORTANT — as the VERY LAST line of your response, output exactly ONE of these status lines:
+  TASK_STATUS: COMPLETE — <one-line summary of what you did>
+  TASK_STATUS: BLOCKED — <reason why you cannot complete this task>
+  TASK_STATUS: PARTIAL — <what you did and what remains>
+Use BLOCKED for tasks that are impossible, nonsensical, or outside your capabilities as a software agent. Do not fabricate success.
+This status line is machine-parsed. Do not omit it.

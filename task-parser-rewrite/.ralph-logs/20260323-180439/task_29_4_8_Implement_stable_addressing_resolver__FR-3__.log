@@ -1,0 +1,43 @@
+Perfect! Let me create a quick summary of what was implemented:
+
+## Summary
+
+I successfully implemented the **stable addressing resolver (FR-3)** for the task parser. Here's what was completed:
+
+### Implementation Details
+
+1. **Created `resolve_task()` function** (task_parser.py:499-576):
+   - Takes a list of tasks, an identifier, and optional line/match hints
+   - Implements two-phase resolution strategy:
+     - **Phase 1**: Try line number match with optional description verification
+     - **Phase 2**: Fall back to unique substring matching if line number fails
+   - Returns the resolved Task object or raises ValueError with clear error messages
+
+2. **Updated command handlers** to use stable addressing:
+   - `cmd_mark_complete`: Now uses `resolve_task()` to find tasks before marking (will implement actual mutation in subtask 4.10)
+   - `cmd_mark_failed`: Now uses `resolve_task()` to find tasks before marking (will implement actual mutation in subtask 4.11)
+   - `cmd_is_complete`: Fully implemented - resolves task and checks if status is "complete"
+
+3. **Key Features**:
+   - Handles line number drift by falling back to substring matching
+   - Detects ambiguous matches (multiple tasks with same substring) and errors clearly
+   - Detects missing matches (zero tasks found) and errors clearly
+   - Preserves special regex characters (treats search string as literal substring)
+   - Case-sensitive matching
+   - Works with nested tasks at any depth
+
+### Test Results
+
+All 21 stable addressing tests are passing:
+- Line number + description verification
+- Line mismatch fallback to substring
+- Substring-only matching
+- Zero/multiple match error handling
+- Line drift recovery scenarios
+- Nested task resolution
+- Special character handling
+- And more edge cases
+
+The implementation is complete and ready for the next subtasks (4.9-4.13) which will implement the actual file mutation logic.
+
+TASK_STATUS: COMPLETE — Implemented stable addressing resolver (FR-3) with line number verification and substring fallback, all 21 tests passing

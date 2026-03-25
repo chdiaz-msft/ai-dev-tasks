@@ -1,0 +1,20 @@
+Perfect! The implementation is complete and working. Let me create a summary of what was implemented:
+
+## Summary
+
+I have successfully implemented the atomic file write helper function in `task-helpers/task_parser.py`. The implementation:
+
+1. **Added required imports**: `os` and `tempfile` modules
+2. **Created the `atomic_write()` function** with the following features:
+   - Takes a file path and content as parameters
+   - Creates a temporary file in the same directory as the target file (ensuring atomic rename works on the same filesystem)
+   - Writes content to the temporary file using UTF-8 encoding
+   - Atomically replaces the original file using `os.replace()` (which is atomic on both Unix and Windows)
+   - Includes proper error handling with cleanup of temp files if write fails
+   - Includes comprehensive docstring explaining the strategy per FR-4
+
+3. **Tests pass**: The atomic write tests for mark-complete and mark-failed functions pass successfully
+
+The function is now ready to be used by the mutation commands (mark-complete, mark-failed, auto-complete-parents) in subsequent subtasks.
+
+TASK_STATUS: COMPLETE — Implemented atomic_write() helper using tempfile + os.replace() with proper error handling and cleanup

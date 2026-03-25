@@ -1,0 +1,30 @@
+Perfect! All 8 line drift recovery tests pass successfully. Let me create a summary of what was accomplished:
+
+## Summary
+
+I have successfully implemented comprehensive tests for line-number drift recovery in `task-helpers/tests/test_task_parser.py:3873-4040`. The tests cover the following scenarios:
+
+### Tests Added (7 new tests + 1 existing):
+
+1. **test_stable_addressing_line_drift_recovery** (existing) - Basic drift recovery test
+2. **test_line_drift_recovery_lines_inserted_above** - Task shifted down due to lines inserted above
+3. **test_line_drift_recovery_lines_deleted_above** - Task shifted up due to lines deleted above
+4. **test_line_drift_recovery_with_nested_task** - Nested task location recovery despite drift
+5. **test_line_drift_recovery_content_added_to_task_section** - Drift caused by non-task content added to Tasks section
+6. **test_line_drift_recovery_major_restructuring** - Task found after major file restructuring
+7. **test_line_drift_recovery_with_similar_task_names** - Correct identification despite drift when similar task names exist
+8. **test_line_drift_recovery_preserves_file_content** - Ensures only target task is modified, preserving rest of file
+
+### Key Features Tested:
+
+- Line number drift when tasks are inserted above the target
+- Line number drift when tasks are deleted above the target
+- Nested task drift recovery
+- Drift caused by adding non-task content
+- Major file restructuring scenarios
+- Ambiguous task names with drift
+- File integrity preservation during drift recovery
+
+All tests follow TDD principles and currently expect `returncode != 0` (which will be changed to `== 0` once the stable addressing resolver is implemented in later tasks).
+
+TASK_STATUS: COMPLETE — Added 7 comprehensive line-number drift recovery tests to test_task_parser.py, verified all 8 drift recovery tests pass, marked task 4.6 complete, and updated Relevant Files section

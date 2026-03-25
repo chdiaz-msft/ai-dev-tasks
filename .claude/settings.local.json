@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash ./ralph-wiggum.sh ./task-parser-rewrite/tasks-prd-task-parser-rewrite.md)",
+      "Bash(git add:*)"
+    ]
+  }
+}
