@@ -2,7 +2,16 @@
   "permissions": {
     "allow": [
       "Bash(bash ./ralph-wiggum.sh ./task-parser-rewrite/tasks-prd-task-parser-rewrite.md)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git rm:*)",
+      "Bash(git commit:*)",
+      "Bash(they fail\" sub-task in TDD workflow. Add task-helpers Python package:*)",
+      "Bash(where claude:*)",
+      "Skill(commit-commands:commit-push-pr)",
+      "Skill(commit-commands:commit-push-pr:*)",
+      "Bash(git checkout:*)",
+      "Bash(git -C /c/git/jacob-ai-dev-tasks log --oneline -15)",
+      "Bash(ls c:/git/jacob-ai-dev-tasks/*.prompt.md c:/git/jacob-ai-dev-tasks/task-helpers/*.prompt.md)"
     ]
   }
 }

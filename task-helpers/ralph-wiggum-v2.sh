@@ -24,6 +24,7 @@ set -euo pipefail
 #   --permission-mode <mode>     Permission mode for Claude (default: auto)
 #   --system-prompt-file <path>  Prompt file to append to each Claude call
 #   --print-only                 Dry run — print tasks without executing
+#   --verbose, -v                Verbose debug logging for troubleshooting
 
 # ── Colors & output helpers ──────────────────────────────────────────────────
 
@@ -35,11 +36,12 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
-log()   { echo -e "${BLUE}[ralph]${NC} $*"; }
-ok()    { echo -e "${GREEN}[ralph]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[ralph]${NC} $*"; }
-err()   { echo -e "${RED}[ralph]${NC} $*" >&2; }
-header(){ echo -e "\n${BOLD}${CYAN}═══ $* ═══${NC}\n"; }
+log()     { echo -e "${BLUE}[ralph]${NC} $*"; }
+ok()      { echo -e "${GREEN}[ralph]${NC} $*"; }
+warn()    { echo -e "${YELLOW}[ralph]${NC} $*"; }
+err()     { echo -e "${RED}[ralph]${NC} $*" >&2; }
+header()  { echo -e "\n${BOLD}${CYAN}═══ $* ═══${NC}\n"; }
+verbose() { $VERBOSE && echo -e "${CYAN}[ralph:debug]${NC} $*" >&2 || true; }
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 
@@ -48,6 +50,7 @@ MAX_RETRIES=2
 MAX_BUDGET_USD=5
 PERMISSION_MODE="bypassPermissions"
 PRINT_ONLY=false
+VERBOSE=false
 SYSTEM_PROMPT_FILE=""
 
 # ── Arg parsing ──────────────────────────────────────────────────────────────
@@ -62,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --permission-mode)    PERMISSION_MODE="$2"; shift 2 ;;
     --system-prompt-file) SYSTEM_PROMPT_FILE="$2"; shift 2 ;;
     --print-only)         PRINT_ONLY=true; shift ;;
+    --verbose|-v)         VERBOSE=true; shift ;;
     -h|--help)
       sed -n '3,/^$/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -149,42 +153,80 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TASK_PARSER="$SCRIPT_DIR/task_parser.py"
 
+# ── Parser wrapper with error handling ──────────────────────────────────────
+# Captures stderr, logs on failure, prevents set -e from killing the script.
+# Exit codes from task_parser.py:
+#   0 = success
+#   1 = "no result" (e.g., no incomplete tasks for next-task)
+#   3 = error (file not found, parse error, etc.)
+
+run_parser() {
+  local subcmd="$1"; shift
+  local stdout_output stderr_output exit_code
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  verbose "run_parser: uv run task_parser.py $subcmd $*"
+
+  # Capture stdout and stderr separately; prevent set -e from killing us
+  stdout_output=$(uv run "$TASK_PARSER" "$subcmd" "$@" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(<"$stderr_file")
+  rm -f "$stderr_file"
+
+  verbose "run_parser: $subcmd exited $exit_code"
+  if [[ -n "$stderr_output" ]]; then
+    verbose "run_parser: $subcmd stderr: $stderr_output"
+  fi
+
+  # Log errors for non-expected exit codes (0=success, 1=no-result are expected)
+  if [[ $exit_code -ne 0 && $exit_code -ne 1 ]]; then
+    err "task_parser '$subcmd' failed (exit $exit_code)"
+    if [[ -n "$stderr_output" ]]; then
+      err "  stderr: $stderr_output"
+    fi
+    if [[ -n "$stdout_output" ]]; then
+      err "  stdout: $stdout_output"
+    fi
+  fi
+
+  echo "$stdout_output"
+  return $exit_code
+}
+
 # Get the next incomplete LEAF task (skips parents that have subtasks)
 # Returns: line_number|parent_text|task_text
-#   line_number: 1-based line in the file
-#   parent_text: text of the parent task (empty if top-level)
-#   task_text:   text of the subtask itself
+#   Exit 0 = found a task, Exit 1 = no incomplete tasks, Exit 3 = error
 get_next_task() {
-  uv run "$TASK_PARSER" next-task "$TASKS_FILE"
+  run_parser next-task "$TASKS_FILE"
 }
 
 # Mark a task as failed by line number and description (for stable addressing)
 mark_task_failed() {
   local line_num="$1"
   local task_desc="$2"
-  uv run "$TASK_PARSER" mark-failed "$TASKS_FILE" --line "$line_num" --match "$task_desc"
+  run_parser mark-failed "$TASKS_FILE" --line "$line_num" --match "$task_desc"
 }
 
 # Check if a specific line is now marked complete [x]
 is_task_marked_complete() {
   local line_num="$1"
   local task_desc="$2"
-  uv run "$TASK_PARSER" is-complete "$TASKS_FILE" --line "$line_num" --match "$task_desc"
+  run_parser is-complete "$TASKS_FILE" --line "$line_num" --match "$task_desc"
 }
 
 # Auto-complete parent tasks whose subtasks are all [x]
 auto_complete_parents() {
-  uv run "$TASK_PARSER" auto-complete-parents "$TASKS_FILE"
+  run_parser auto-complete-parents "$TASKS_FILE"
 }
 
 # Extract the verification section content (supports h1, h2, h3 headers)
 get_verification_section() {
-  uv run "$TASK_PARSER" verification-section "$TASKS_FILE"
+  run_parser verification-section "$TASKS_FILE"
 }
 
 # Count total and completed tasks (leaves only)
 count_tasks() {
-  uv run "$TASK_PARSER" count "$TASKS_FILE"
+  run_parser count "$TASKS_FILE"
 }
 
 # ── Run Claude headless ──────────────────────────────────────────────────────
@@ -232,7 +274,7 @@ run_claude() {
 
 header "Ralph Wiggum Loop"
 log "Tasks file: $TASKS_FILE"
-log "Model: $MODEL | Max retries: $MAX_RETRIES | Budget/call: \$$MAX_BUDGET_USD"
+log "Model: $MODEL | Max retries: $MAX_RETRIES | Budget/call: \$$MAX_BUDGET_USD | Verbose: $VERBOSE"
 if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
   log "System prompt: $SYSTEM_PROMPT_FILE"
 fi
@@ -252,7 +294,24 @@ any_failures=false
 while true; do
   # Re-read file each iteration (Claude may have modified it)
   # Get next incomplete leaf task
-  task_info=$(get_next_task) || break
+  verbose "Main loop: calling get_next_task"
+  task_info=$(get_next_task) && next_exit=0 || next_exit=$?
+
+  if [[ $next_exit -eq 1 ]]; then
+    log "No more incomplete tasks — exiting loop"
+    break
+  elif [[ $next_exit -ne 0 ]]; then
+    err "get_next_task failed (exit $next_exit) — aborting task loop"
+    # Snapshot task file state for post-mortem debugging
+    if [[ -d "$LOG_DIR" ]]; then
+      cp "$TASKS_FILE" "$LOG_DIR/tasks_at_failure.md" 2>/dev/null || true
+      err "Task file snapshot saved to: $LOG_DIR/tasks_at_failure.md"
+    fi
+    any_failures=true
+    break
+  fi
+
+  verbose "Main loop: get_next_task returned: $task_info"
 
   line_num="${task_info%%|*}"
   rest="${task_info#*|}"
@@ -260,7 +319,12 @@ while true; do
   task_desc="${rest#*|}"
   task_number=$((task_number + 1))
 
-  counts="$(count_tasks)"
+  verbose "Main loop: calling count_tasks"
+  counts="$(count_tasks)" && count_exit=0 || count_exit=$?
+  if [[ $count_exit -ne 0 ]]; then
+    warn "count_tasks failed (exit $count_exit) — using fallback counts"
+    counts="?|?|?"
+  fi
   total="${counts%%|*}"
   rest2="${counts#*|}"
   completed="${rest2%%|*}"
@@ -332,41 +396,50 @@ This status line is machine-parsed. Do not omit it."
 
       # Check the file for the [x] mark as ground truth
       file_marked=false
+      verbose "Checking if task is marked complete (line $line_num)"
       if $PRINT_ONLY || is_task_marked_complete "$line_num" "$task_desc"; then
         file_marked=true
       fi
+      verbose "file_marked=$file_marked"
 
       # Decision matrix: status signal + file mark
       if $file_marked; then
         # Task was marked complete in the file — trust it
         ok "Task complete: ${status_detail:-done}"
-        echo "$output" | grep -v "^TASK_STATUS:" | tail -10
+        echo "$output" | { grep -v "^TASK_STATUS:" || true; } | tail -10
         task_succeeded=true
 
         if $PRINT_ONLY; then
           sed -i "${line_num}s/- \[ \?\]/- [x]/" "$TASKS_FILE"
         fi
 
-        auto_complete_parents
+        verbose "Running auto_complete_parents"
+        if ! auto_complete_parents; then
+          warn "auto_complete_parents failed — parent tasks may need manual completion"
+        fi
         break
 
       elif [[ "$status_type" == "BLOCKED" ]]; then
         # Claude explicitly says it's blocked — mark failed and continue to next task
         err "Task blocked: $status_detail"
-        echo "$output" | grep -v "^TASK_STATUS:" | tail -10
-        mark_task_failed "$line_num" "$task_desc"
+        echo "$output" | { grep -v "^TASK_STATUS:" || true; } | tail -10
+        if ! mark_task_failed "$line_num" "$task_desc"; then
+          warn "mark_task_failed also failed — task may not be marked [!] in file"
+        fi
         any_failures=true
         break
 
       elif [[ "$status_type" == "PARTIAL" ]]; then
         # Claude made progress but didn't finish — retry with context
         warn "Task partial: $status_detail"
-        echo "$output" | grep -v "^TASK_STATUS:" | tail -10
+        echo "$output" | { grep -v "^TASK_STATUS:" || true; } | tail -10
         retries=$((retries + 1))
         if [[ $retries -gt $MAX_RETRIES ]]; then
           err "Task still incomplete after $MAX_RETRIES retries: $task_desc"
           err "Last status: $status_detail"
-          mark_task_failed "$line_num" "$task_desc"
+          if ! mark_task_failed "$line_num" "$task_desc"; then
+          warn "mark_task_failed also failed — task may not be marked [!] in file"
+        fi
           any_failures=true
           break
         fi
@@ -378,11 +451,13 @@ Please pick up where the previous attempt left off."
       elif [[ "$status_type" == "COMPLETE" ]] && ! $file_marked; then
         # Claude claims complete but didn't mark the file
         warn "Claude reported COMPLETE but task not marked [x] in file"
-        echo "$output" | grep -v "^TASK_STATUS:" | tail -10
+        echo "$output" | { grep -v "^TASK_STATUS:" || true; } | tail -10
         retries=$((retries + 1))
         if [[ $retries -gt $MAX_RETRIES ]]; then
           err "Task reported complete but never marked in file: $task_desc"
-          mark_task_failed "$line_num" "$task_desc"
+          if ! mark_task_failed "$line_num" "$task_desc"; then
+          warn "mark_task_failed also failed — task may not be marked [!] in file"
+        fi
           any_failures=true
           break
         fi
@@ -390,11 +465,13 @@ Please pick up where the previous attempt left off."
       else
         # No status line or unrecognized — fall back to file check
         warn "No TASK_STATUS line found in output (check log: $task_log)"
-        echo "$output" | grep -v "^TASK_STATUS:" | tail -10
+        echo "$output" | { grep -v "^TASK_STATUS:" || true; } | tail -10
         retries=$((retries + 1))
         if [[ $retries -gt $MAX_RETRIES ]]; then
           err "Task did not produce status after $MAX_RETRIES retries: $task_desc"
-          mark_task_failed "$line_num" "$task_desc"
+          if ! mark_task_failed "$line_num" "$task_desc"; then
+          warn "mark_task_failed also failed — task may not be marked [!] in file"
+        fi
           any_failures=true
           break
         fi
@@ -409,7 +486,9 @@ Please pick up where the previous attempt left off."
       retries=$((retries + 1))
       if [[ $retries -gt $MAX_RETRIES ]]; then
         err "Claude crashed $MAX_RETRIES times on: $task_desc"
-        mark_task_failed "$line_num" "$task_desc"
+        if ! mark_task_failed "$line_num" "$task_desc"; then
+          warn "mark_task_failed also failed — task may not be marked [!] in file"
+        fi
         any_failures=true
         break
       fi
@@ -419,7 +498,7 @@ done
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
-counts="$(count_tasks)"
+counts="$(count_tasks)" && true || counts="?|?|?"
 total="${counts%%|*}"
 rest="${counts#*|}"
 completed="${rest%%|*}"
@@ -427,7 +506,11 @@ failed="${rest#*|}"
 
 echo ""
 header "Task Execution Summary"
-log "Total: $total | Completed: $completed | Failed: $failed | Remaining: $((total - completed - failed))"
+if [[ "$total" == "?" ]]; then
+  log "Total: unknown (count_tasks failed) | Failures occurred: $any_failures"
+else
+  log "Total: $total | Completed: $completed | Failed: $failed | Remaining: $((total - completed - failed))"
+fi
 if ! $PRINT_ONLY; then
   log "Logs: $LOG_DIR"
 fi
@@ -440,7 +523,10 @@ fi
 # Always attempt verification after all tasks have been processed,
 # regardless of whether some tasks failed or were blocked.
 
-verification="$(get_verification_section)"
+verification="$(get_verification_section)" && true || {
+  warn "get_verification_section failed — skipping verification"
+  verification=""
+}
 
 if [[ -z "${verification// /}" ]]; then
   warn "No verification section found in tasks file — skipping verification"
