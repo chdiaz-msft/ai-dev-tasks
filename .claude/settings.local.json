@@ -11,7 +11,10 @@
       "Skill(commit-commands:commit-push-pr:*)",
       "Bash(git checkout:*)",
       "Bash(git -C /c/git/jacob-ai-dev-tasks log --oneline -15)",
-      "Bash(ls c:/git/jacob-ai-dev-tasks/*.prompt.md c:/git/jacob-ai-dev-tasks/task-helpers/*.prompt.md)"
+      "Bash(ls c:/git/jacob-ai-dev-tasks/*.prompt.md c:/git/jacob-ai-dev-tasks/task-helpers/*.prompt.md)",
+      "Bash(git push:*)",
+      "Skill(commit-commands:commit)",
+      "Skill(commit-commands:commit:*)"
     ]
   }
 }

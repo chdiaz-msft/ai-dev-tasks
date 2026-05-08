@@ -279,8 +279,9 @@ if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
   log "System prompt: $SYSTEM_PROMPT_FILE"
 fi
 
-# Set up per-task log directory
-LOG_DIR="$TASKS_DIR/.ralph-logs/$(date +%Y%m%d-%H%M%S)"
+# Set up per-task log directory (at repo root so it survives folder moves during feature completion)
+REPO_ROOT="$(git -C "$TASKS_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$TASKS_DIR")"
+LOG_DIR="$REPO_ROOT/.ralph-logs/$(basename "$TASKS_DIR")/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG_DIR"
 if ! $PRINT_ONLY; then
   log "Task logs: $LOG_DIR"
@@ -628,6 +629,11 @@ $complete_prompt_content
 The task file is: $TASKS_FILE
 Apply these steps to the feature folder containing that task file."
 
+      verbose "Feature completion: TASKS_DIR=$TASKS_DIR"
+      verbose "Feature completion: TASKS_FILE=$TASKS_FILE"
+      verbose "Feature completion: LOG_DIR=$LOG_DIR"
+      verbose "Feature completion: prompt length=${#complete_run_prompt} chars"
+
       if $PRINT_ONLY; then
         run_claude "$complete_run_prompt"
         ok "RESULT: DRY RUN COMPLETE — feature completion would run here"
@@ -638,11 +644,21 @@ Apply these steps to the feature folder containing that task file."
       complete_log="$LOG_DIR/complete-feature.log"
 
       if complete_output=$(run_claude "$complete_run_prompt"); then
+        # Re-create LOG_DIR in case feature completion moved the parent folder
+        if [[ ! -d "$LOG_DIR" ]]; then
+          warn "LOG_DIR disappeared during feature completion (folder likely moved) — recreating"
+          verbose "Feature completion: original LOG_DIR=$LOG_DIR no longer exists"
+          mkdir -p "$LOG_DIR"
+        fi
         echo "$complete_output" > "$complete_log"
         log "Feature completion log saved to: $complete_log"
         echo "$complete_output" | tail -20
         ok "Feature completion finished"
       else
+        # Re-create LOG_DIR defensively before writing error log
+        if [[ ! -d "$LOG_DIR" ]]; then
+          mkdir -p "$LOG_DIR" 2>/dev/null || true
+        fi
         echo "$complete_output" > "$complete_log" 2>/dev/null || true
         warn "Feature completion call failed (log: $complete_log)"
         warn "All tasks passed verification — feature completion can be run manually"

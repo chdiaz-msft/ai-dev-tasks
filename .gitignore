@@ -1,3 +1,4 @@
 tasks/
+.ralph-logs/
 __pycache__/
 *.pyc
