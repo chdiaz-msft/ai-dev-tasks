@@ -388,12 +388,12 @@ class TestTerminationStatus:
 class TestIssueStatus:
     """Tests for the IssueStatus enum."""
 
-    def test_issue_status_has_four_values(self):
-        """Test that IssueStatus enum has exactly four values."""
-        expected_values = {"OPEN", "RESOLVED", "WONT_FIX", "ESCALATED"}
+    def test_issue_status_has_five_values(self):
+        """Test that IssueStatus enum has exactly five values."""
+        expected_values = {"OPEN", "RESOLVED", "WONT_FIX", "ESCALATED", "ABANDONED"}
         actual_values = {member.name for member in IssueStatus}
 
-        assert len(actual_values) == 4
+        assert len(actual_values) == 5
         assert actual_values == expected_values
 
     def test_issue_status_values(self):
@@ -402,3 +402,4 @@ class TestIssueStatus:
         assert IssueStatus.RESOLVED.value == "resolved"
         assert IssueStatus.WONT_FIX.value == "wont_fix"
         assert IssueStatus.ESCALATED.value == "escalated"
+        assert IssueStatus.ABANDONED.value == "abandoned"

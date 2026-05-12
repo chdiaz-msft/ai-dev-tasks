@@ -86,3 +86,48 @@ def classify_severity(raw: str) -> str:
     if normalized in SEV_ORDER:
         return normalized
     return "info"
+
+
+def escalate_severity(current: str) -> str:
+    """
+    Bump severity up one level, capped at critical.
+
+    Escalation ladder: info → low → medium → high → critical.
+    If already critical, returns critical (no-op).
+
+    Args:
+        current: Current severity level
+
+    Returns:
+        Next severity level up, or 'critical' if already at maximum
+    """
+    ladder = ["info", "low", "medium", "high", "critical"]
+    normalized = current.lower()
+    if normalized not in ladder:
+        return "medium"  # Unknown severity defaults to medium on escalation
+    idx = ladder.index(normalized)
+    if idx >= len(ladder) - 1:
+        return "critical"
+    return ladder[idx + 1]
+
+
+def severity_label(severity: str) -> str:
+    """
+    Return a human-friendly label for a severity level.
+
+    Includes an emoji indicator for quick visual scanning in logs and reports.
+
+    Args:
+        severity: Canonical severity level
+
+    Returns:
+        Formatted label string like "🔴 CRITICAL" or "🟡 MEDIUM"
+    """
+    labels = {
+        "critical": "🔴 CRITICAL",
+        "high": "🟠 HIGH",
+        "medium": "🟡 MEDIUM",
+        "low": "🔵 LOW",
+        "info": "⚪ INFO",
+    }
+    return labels.get(severity.lower(), f"❓ {severity.upper()}")
