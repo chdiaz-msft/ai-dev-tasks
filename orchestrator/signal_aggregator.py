@@ -264,6 +264,7 @@ def build_signals(
     comments: list[Any],
     alerts_json: str,
     threads_json: str,
+    metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build unified signals dict from all sources.
@@ -277,10 +278,11 @@ def build_signals(
         comments: List of PyGithub review comment objects
         alerts_json: JSON string of code scanning alerts
         threads_json: GraphQL JSON string of review threads
+        metrics: Optional metrics summary from metrics_collector
 
     Returns:
         Dict with keys: pr_number, head_sha, swarm_findings, reviewer_coverage,
-        checks, ai_reviews, human_reviews, unresolved_threads, security
+        checks, ai_reviews, human_reviews, unresolved_threads, security, metrics
     """
     # Load swarm findings
     swarm_findings, reviewer_coverage = load_swarm_findings(swarm_path)
@@ -336,6 +338,7 @@ def build_signals(
         "ai_reviews": ai_reviews,
         "unresolved_threads": unresolved_threads,
         "security": security_alerts,
+        "metrics": metrics or {},
     }
 
 

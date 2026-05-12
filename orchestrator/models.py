@@ -30,6 +30,52 @@ class IssueStatus(StrEnum):
     RESOLVED = "resolved"
     WONT_FIX = "wont_fix"
     ESCALATED = "escalated"
+    ABANDONED = "abandoned"
+
+
+@dataclass
+class EscalationEvent:
+    """
+    Records a severity escalation event for audit purposes.
+
+    Attributes:
+        issue_id: ID of the escalated issue
+        from_severity: Original severity level before escalation
+        to_severity: New severity level after escalation
+        reason: Why the escalation occurred
+        round_number: Round in which the escalation happened
+        timestamp: ISO 8601 timestamp of the escalation
+    """
+
+    issue_id: str
+    from_severity: str
+    to_severity: str
+    reason: str
+    round_number: int
+    timestamp: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert EscalationEvent to a dictionary for serialization."""
+        return {
+            "issue_id": self.issue_id,
+            "from_severity": self.from_severity,
+            "to_severity": self.to_severity,
+            "reason": self.reason,
+            "round_number": self.round_number,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EscalationEvent":
+        """Create an EscalationEvent from a dictionary."""
+        return cls(
+            issue_id=str(data["issue_id"]),
+            from_severity=str(data["from_severity"]),
+            to_severity=str(data["to_severity"]),
+            reason=str(data["reason"]),
+            round_number=int(data["round_number"]),
+            timestamp=str(data["timestamp"]),
+        )
 
 
 @dataclass
@@ -49,6 +95,9 @@ class Issue:
         status: Current status of the issue (default: "open")
         resolved_in_round: Round number when the issue was resolved (optional)
         resolution: Description of how the issue was resolved (optional)
+        fix_attempts: Number of times the flywheel has attempted to fix this issue
+        original_severity: The reviewer's original severity before any escalation
+        escalated: Whether this issue has been escalated from its original severity
     """
 
     issue_id: str
@@ -62,6 +111,9 @@ class Issue:
     status: str = "open"
     resolved_in_round: int | None = None
     resolution: str | None = None
+    fix_attempts: int = 0
+    original_severity: str | None = None
+    escalated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """
@@ -82,6 +134,9 @@ class Issue:
             "status": self.status,
             "resolved_in_round": self.resolved_in_round,
             "resolution": self.resolution,
+            "fix_attempts": self.fix_attempts,
+            "original_severity": self.original_severity,
+            "escalated": self.escalated,
         }
 
     @classmethod
@@ -98,6 +153,7 @@ class Issue:
         line_val = data["line"]
         resolved_round_val = data.get("resolved_in_round")
         resolution_val = data.get("resolution")
+        original_sev_val = data.get("original_severity")
 
         return cls(
             issue_id=str(data["issue_id"]),
@@ -113,6 +169,9 @@ class Issue:
             if resolved_round_val is not None
             else None,
             resolution=str(resolution_val) if resolution_val is not None else None,
+            fix_attempts=int(data.get("fix_attempts", 0)),
+            original_severity=str(original_sev_val) if original_sev_val is not None else None,
+            escalated=bool(data.get("escalated", False)),
         )
 
 
@@ -128,6 +187,7 @@ class LoopState:
         issues: Dictionary of issues by issue_id
         termination: Termination status (optional)
         last_round_timestamp: ISO 8601 timestamp of the last round (optional)
+        escalation_events: List of escalation events that have occurred
     """
 
     pr_number: int
@@ -136,6 +196,7 @@ class LoopState:
     issues: dict[str, Issue] = field(default_factory=dict)
     termination: str | None = None
     last_round_timestamp: str | None = None
+    escalation_events: list[EscalationEvent] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """
@@ -153,6 +214,7 @@ class LoopState:
             },
             "termination": self.termination,
             "last_round_timestamp": self.last_round_timestamp,
+            "escalation_events": [event.to_dict() for event in self.escalation_events],
         }
 
     @classmethod
@@ -182,6 +244,13 @@ class LoopState:
         termination_val = data.get("termination")
         timestamp_val = data.get("last_round_timestamp")
 
+        escalation_events_data = data.get("escalation_events", [])
+        escalation_events = [
+            EscalationEvent.from_dict(cast(dict[str, Any], event_dict))
+            for event_dict in escalation_events_data
+            if isinstance(event_dict, dict)
+        ]
+
         return cls(
             pr_number=int(pr_number_val),
             current_round=int(current_round_val),
@@ -191,4 +260,5 @@ class LoopState:
             last_round_timestamp=str(timestamp_val)
             if timestamp_val is not None
             else None,
+            escalation_events=escalation_events,
         )

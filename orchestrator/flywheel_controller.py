@@ -19,6 +19,9 @@ from typing import Any
 
 from orchestrator.models import Issue, LoopState
 from orchestrator.severity_classifier import filter_by_floor
+from orchestrator.metrics_collector import collect_metrics
+from orchestrator.escalation_policy import apply_escalations
+from orchestrator.metrics_exporter import build_metrics_summary, write_metrics
 
 # Constants
 STATE_FILE = Path("state/loop-state.json")
@@ -294,8 +297,9 @@ def main() -> None:
     """
     Main entry point for the flywheel controller.
 
-    Reads signals, loads state, merges findings, decides next action,
-    writes decision.json and GITHUB_OUTPUT.
+    Reads signals, loads state, merges findings, runs escalation policy,
+    collects metrics, decides next action, writes decision.json, metrics,
+    and GITHUB_OUTPUT.
     """
     parser = argparse.ArgumentParser(
         description="PR Flywheel controller - decide next action"
@@ -308,8 +312,22 @@ def main() -> None:
         help="Minimum severity level for actionable issues",
     )
     parser.add_argument("--out", required=True, help="Output path for decision.json")
+    parser.add_argument(
+        "--escalation-config",
+        default=None,
+        help="JSON string with escalation config overrides (max_fix_attempts, sla_seconds, recurrence_window)",
+    )
 
     args = parser.parse_args()
+
+    # Parse escalation config if provided
+    escalation_config = None
+    if args.escalation_config:
+        try:
+            escalation_config = json.loads(args.escalation_config)
+        except json.JSONDecodeError:
+            import logging
+            logging.warning(f"Invalid escalation config JSON: {args.escalation_config}")
 
     # Load signals
     with open(args.signals, "r") as f:
@@ -323,6 +341,43 @@ def main() -> None:
 
     # Merge findings
     merge_findings(state, swarm_findings)
+
+    # Convert issues to Issue objects for metrics and escalation
+    issues_dict = state.get("issues", {})
+    issue_objects: dict[str, Issue] = {}
+    for issue_id, issue_data in issues_dict.items():
+        if isinstance(issue_data, dict):
+            issue_objects[issue_id] = Issue.from_dict(issue_data)
+
+    # Build round timestamps (simplified — uses last_round_timestamp for current round)
+    current_round = state.get("current_round", 0)
+    round_timestamps: dict[int, str] = {}
+    last_ts = state.get("last_round_timestamp")
+    if last_ts:
+        round_timestamps[current_round] = last_ts
+
+    # Collect metrics
+    metrics_data = collect_metrics(issue_objects, current_round, round_timestamps)
+
+    # Apply escalation policy
+    escalation_events = apply_escalations(
+        issue_objects, current_round, round_timestamps, escalation_config
+    )
+
+    # Write back escalated issues to state
+    for issue_id, issue_obj in issue_objects.items():
+        state["issues"][issue_id] = issue_obj.to_dict()
+
+    # Record escalation events in state
+    if escalation_events:
+        state.setdefault("escalation_events", [])
+        for event in escalation_events:
+            state["escalation_events"].append(event.to_dict())
+
+    # Build and write metrics
+    escalation_event_dicts = [e.to_dict() for e in escalation_events]
+    metrics_summary = build_metrics_summary(metrics_data, escalation_event_dicts, current_round)
+    write_metrics(metrics_summary)
 
     # Make decision
     decision = decide(state, args.severity_floor, signals)

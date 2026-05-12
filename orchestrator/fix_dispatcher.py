@@ -19,6 +19,9 @@ FORBIDDEN_PATTERNS = [
 
 MAX_DISPATCH_ITEMS = 10
 
+# Maximum fix attempts before abandoning an issue
+MAX_RETRY_BUDGET = 5
+
 
 def select_agent(enable_claude: bool, enable_copilot_agent: bool) -> str:
     """
@@ -115,3 +118,41 @@ def get_forbidden_files(changed_files: list[str]) -> list[str]:
                 forbidden.append(file)
                 break  # Don't add the same file multiple times
     return forbidden
+
+
+def increment_fix_attempts(issues: dict[str, object], dispatched_ids: list[str]) -> None:
+    """
+    Increment the fix_attempts counter for all dispatched issues.
+
+    Should be called after dispatch_payload is built, before the fix
+    agent begins work.
+
+    Args:
+        issues: Dictionary of issue_id to issue dicts (mutated in place)
+        dispatched_ids: List of issue_ids that were dispatched for fixing
+    """
+    for issue_id in dispatched_ids:
+        if issue_id in issues:
+            issue = issues[issue_id]
+            if isinstance(issue, dict):
+                current = issue.get("fix_attempts", 0)
+                issue["fix_attempts"] = current + 1  # type: ignore[index]
+
+
+def should_abandon_fix(issue: dict[str, object]) -> bool:
+    """
+    Check if an issue has exceeded its retry budget and should be abandoned.
+
+    Issues that exceed MAX_RETRY_BUDGET fix attempts should be marked
+    as abandoned rather than dispatched for another fix attempt.
+
+    Args:
+        issue: Issue dictionary with fix_attempts field
+
+    Returns:
+        True if the issue should be abandoned, False otherwise
+    """
+    fix_attempts = issue.get("fix_attempts", 0)
+    if isinstance(fix_attempts, int):
+        return fix_attempts >= MAX_RETRY_BUDGET
+    return False
