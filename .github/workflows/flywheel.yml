@@ -1,0 +1,319 @@
+name: PR Flywheel
+
+on:
+  workflow_call:
+    inputs:
+      max_iterations:
+        description: 'Maximum number of review-fix iterations'
+        type: number
+        required: false
+        default: 5
+      severity_floor:
+        description: 'Minimum severity level to act on (critical/high/medium/low/info)'
+        type: string
+        required: false
+        default: 'high'
+      enable_claude:
+        description: 'Enable Claude Code fix agent'
+        type: boolean
+        required: false
+        default: true
+      enable_copilot_agent:
+        description: 'Enable GitHub Copilot fix agent'
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: 'Anthropic API key for Claude Code'
+        required: false
+      FLYWHEEL_APP_ID:
+        description: 'GitHub App ID for flywheel bot'
+        required: true
+      FLYWHEEL_APP_KEY:
+        description: 'GitHub App private key for flywheel bot'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
+  issues: write
+  security-events: read
+
+jobs:
+  flywheel:
+    runs-on: ubuntu-latest
+    if: |
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event_name != 'check_suite' ||
+       (github.event.check_suite.app.slug != 'flywheel-bot' &&
+        github.event.check_suite.conclusion != 'success' &&
+        !contains(github.event.check_suite.pull_requests[0].labels.*.name, 'flywheel/merge-ready'))) &&
+      !github.event.pull_request.draft
+    concurrency:
+      group: flywheel-${{ steps.pr-info.outputs.pr_number }}
+      cancel-in-progress: true
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FLYWHEEL_APP_ID }}
+          private-key: ${{ secrets.FLYWHEEL_APP_KEY }}
+
+      - name: Normalize event / resolve PR info
+        id: pr-info
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          # Handle different event types
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # Direct pull_request event
+            pr_number="${{ github.event.pull_request.number }}"
+            head_ref="${{ github.event.pull_request.head.ref }}"
+            head_sha="${{ github.event.pull_request.head.sha }}"
+            draft="${{ github.event.pull_request.draft }}"
+
+          elif [[ "${{ github.event_name }}" == "pull_request_review" ]]; then
+            # Pull request review event
+            pr_number="${{ github.event.pull_request.number }}"
+            head_ref="${{ github.event.pull_request.head.ref }}"
+            head_sha="${{ github.event.pull_request.head.sha }}"
+            draft="${{ github.event.pull_request.draft }}"
+
+          elif [[ "${{ github.event_name }}" == "check_suite" ]]; then
+            # Check suite event - need to look up associated PRs
+            check_suite_id="${{ github.event.check_suite.id }}"
+            head_sha="${{ github.event.check_suite.head_sha }}"
+
+            # Query GitHub API for PRs associated with this check suite
+            pr_data=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${{ github.repository }}/commits/${head_sha}/pulls" \
+              --jq '.[0] // empty')
+
+            if [[ -z "$pr_data" ]]; then
+              echo "No PR found for check_suite with head_sha=${head_sha}"
+              exit 1
+            fi
+
+            pr_number=$(echo "$pr_data" | jq -r '.number')
+            head_ref=$(echo "$pr_data" | jq -r '.head.ref')
+            draft=$(echo "$pr_data" | jq -r '.draft')
+
+          else
+            echo "Unsupported event type: ${{ github.event_name }}"
+            exit 1
+          fi
+
+          # Write outputs
+          echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+          echo "head_ref=${head_ref}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
+          echo "draft=${draft}" >> "$GITHUB_OUTPUT"
+
+          # Log for debugging
+          echo "Resolved PR info:"
+          echo "  PR number: ${pr_number}"
+          echo "  Head ref: ${head_ref}"
+          echo "  Head SHA: ${head_sha}"
+          echo "  Draft: ${draft}"
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr-info.outputs.head_ref }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Checkout template repo
+        uses: actions/checkout@v4
+        with:
+          repository: org/pr-flywheel-template
+          ref: v1
+          path: _flywheel
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install -r _flywheel/orchestrator/requirements.txt
+
+      - name: Restore loop state
+        uses: actions/cache/restore@v4
+        with:
+          path: state/loop-state.json
+          key: flywheel-state-pr-${{ steps.pr-info.outputs.pr_number }}-round-99999
+          restore-keys: |
+            flywheel-state-pr-${{ steps.pr-info.outputs.pr_number }}-round-
+            flywheel-state-pr-${{ steps.pr-info.outputs.pr_number }}
+
+      - name: Check for flywheel:pause label
+        id: pause-check
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          # Query PR labels
+          labels=$(gh pr view ${{ steps.pr-info.outputs.pr_number }} --json labels --jq '.labels[].name')
+
+          # Check if flywheel:pause label is present
+          if echo "$labels" | grep -q '^flywheel:pause$'; then
+            echo "🛑 flywheel:pause label detected. Exiting flywheel job."
+            echo "paused=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "paused=false" >> "$GITHUB_OUTPUT"
+          echo "✅ No pause label found, continuing flywheel execution."
+
+      - name: Dispatch review swarm
+        if: steps.pause-check.outputs.paused != 'true'
+        id: swarm
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR_NUMBER: ${{ steps.pr-info.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+        run: |
+          python _flywheel/orchestrator/review_swarm.py > swarm_result.json
+
+      - name: Aggregate signals
+        if: steps.pause-check.outputs.paused != 'true'
+        id: signals
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ steps.pr-info.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+        run: |
+          python _flywheel/orchestrator/signal_aggregator.py --swarm-findings swarm_result.json > signals.json
+
+      - name: Classify & decide
+        if: steps.pause-check.outputs.paused != 'true'
+        id: decide
+        run: |
+          python _flywheel/orchestrator/flywheel_controller.py --signals signals.json --max-iter ${{ inputs.max_iterations }} --severity-floor ${{ inputs.severity_floor }} --out decision.json
+
+      - name: Save loop state
+        if: steps.pause-check.outputs.paused != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: state/loop-state.json
+          key: flywheel-state-pr-${{ steps.pr-info.outputs.pr_number }}-round-${{ steps.decide.outputs.iteration }}
+
+      - name: Run Claude Code fix
+        if: steps.pause-check.outputs.paused != 'true' && fromJson(steps.decide.outputs.dispatch).agent == 'claude' && inputs.enable_claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            You are the PR Flywheel fix agent. Your task is to address the issues identified in `decision.json`.
+
+            ## Instructions
+
+            1. Read `decision.json` to see the list of actionable items you need to fix.
+            2. Read `_flywheel/prompts/claude-fix-prompt.md` for detailed fix-agent rules and guidelines.
+            3. For each item in the dispatch list:
+               - Locate the file and line mentioned in the issue
+               - Implement the suggested fix
+               - Run tests to verify the fix
+               - Include `[resolves: <issue_id>]` in your commit message
+            4. Follow all rules in the fix prompt, especially:
+               - Only touch files mentioned in the issues
+               - Never edit `.github/workflows/**` or `**/secrets/**`
+               - Do not commit or push (the workflow handles that)
+               - Use Conventional Commits style
+
+            Begin by reading `decision.json` and `_flywheel/prompts/claude-fix-prompt.md`.
+          allowed_tools: "Bash,Edit,Read,Write,Grep"
+          max_turns: 30
+
+      - name: Validate changed paths against allowlist
+        if: steps.pause-check.outputs.paused != 'true' && steps.decide.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+
+          # Get list of changed files
+          changed_files=$(git diff --name-only HEAD || true)
+
+          if [[ -z "$changed_files" ]]; then
+            echo "No files changed, validation passed."
+            exit 0
+          fi
+
+          echo "Checking changed files against forbidden patterns..."
+          echo "$changed_files"
+
+          # Check for forbidden patterns:
+          # - .github/workflows/** (workflow files)
+          # - **/secrets/** (any path containing "secrets")
+          forbidden_files=$(echo "$changed_files" | grep -E '(^\.github/workflows/|secrets)' || true)
+
+          if [[ -n "$forbidden_files" ]]; then
+            echo "❌ ERROR: Forbidden paths detected in changes:"
+            echo "$forbidden_files"
+            echo ""
+            echo "The following path patterns are not allowed:"
+            echo "  - .github/workflows/** (workflow files)"
+            echo "  - **/secrets/** (any path containing 'secrets')"
+            exit 1
+          fi
+
+          echo "✅ All changed files passed validation."
+
+      - name: Commit + push
+        if: steps.pause-check.outputs.paused != 'true' && steps.decide.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          # Configure git identity as flywheel-bot
+          git config user.name "flywheel-bot[bot]"
+          git config user.email "flywheel-bot[bot]@users.noreply.github.com"
+
+          # Stage all changes
+          git add -A
+
+          # Check if there are actually changes to commit
+          if git diff --cached --quiet; then
+            echo "No changes to commit after staging."
+            exit 0
+          fi
+
+          # Extract issue IDs from decision.json for commit message
+          issue_ids=$(jq -r '.dispatch.items[]? | .issue_id' decision.json 2>/dev/null | head -10 | tr '\n' ' ' || echo "")
+
+          # Build commit message with Co-authored-by trailer
+          # Commit changes
+          git commit -m "$(cat <<-EOF
+          fix: address flywheel findings
+
+          Automated fixes for issues identified by PR Flywheel.
+          Issue IDs: ${issue_ids}
+
+          Co-authored-by: Claude <noreply@anthropic.com>
+          EOF
+          )"
+
+          # Push to the PR branch (never force-push)
+          git push origin HEAD:${{ steps.pr-info.outputs.head_ref }}
+
+      - name: Publish merge-ready check
+        if: steps.pause-check.outputs.paused != 'true' && steps.decide.outputs.state == 'ready'
+        uses: LouisBrunner/checks-action@v2
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          name: flywheel/merge-ready
+          conclusion: success
+          sha: ${{ steps.pr-info.outputs.head_sha }}
+          output: |
+            {"summary":"PR is ready to merge after ${{ steps.decide.outputs.iteration }} flywheel iteration(s) with severity floor: ${{ inputs.severity_floor }}","text":"All actionable issues have been resolved. No blocking findings remain at or above the '${{ inputs.severity_floor }}' severity threshold."}

@@ -1,0 +1,9 @@
+{
+  "name": "PR Flywheel",
+  "description": "PR Flywheel — autonomous review-fix loop",
+  "iconName": "rocket",
+  "categories": [
+    "Automation",
+    "Code Review"
+  ]
+}

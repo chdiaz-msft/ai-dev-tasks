@@ -1,0 +1,24 @@
+name: PR Flywheel
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+  check_suite:
+    types: [completed]
+
+jobs:
+  flywheel:
+    uses: org/pr-flywheel-template/.github/workflows/flywheel.yml@v1
+    with:
+      max_iterations: 5
+      severity_floor: high
+      enable_claude: true
+      enable_copilot_agent: false
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      FLYWHEEL_APP_ID: ${{ secrets.FLYWHEEL_APP_ID }}
+      FLYWHEEL_APP_KEY: ${{ secrets.FLYWHEEL_APP_KEY }}
