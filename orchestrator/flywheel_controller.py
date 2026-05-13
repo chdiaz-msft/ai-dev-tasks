@@ -84,6 +84,45 @@ def resolve_issues_from_commit_messages(
                 issues[issue_id]["resolution"] = "Marked resolved via commit message"
 
 
+def resolve_issues_from_dismissed_threads(
+    state: dict[str, Any], resolved_threads: list[dict[str, Any]]
+) -> None:
+    """
+    Mark issues as resolved when their corresponding review threads are dismissed.
+
+    Matches threads to issues by file path and line number proximity (within 5 lines).
+
+    Args:
+        state: Current loop state dictionary
+        resolved_threads: List of resolved thread dicts with keys: path, line, body
+    """
+    current_round = state.get("current_round", 0)
+    issues = state.get("issues", {})
+
+    for thread in resolved_threads:
+        thread_path = thread.get("path", "")
+        thread_line = thread.get("line")
+
+        for issue in issues.values():
+            if issue.get("status") != "open":
+                continue
+
+            issue_file = issue.get("file", "")
+            issue_line = issue.get("line")
+
+            if issue_file != thread_path:
+                continue
+
+            if thread_line is not None and issue_line is not None:
+                if abs(thread_line - issue_line) > 5:
+                    continue
+
+            issue["status"] = "resolved"
+            issue["resolved_in_round"] = current_round
+            issue["resolution"] = "Resolved via dismissed review thread"
+            break
+
+
 def merge_findings(
     state: dict[str, Any],
     findings: list[dict[str, Any]],
@@ -323,6 +362,12 @@ def main() -> None:
 
     # Merge findings
     merge_findings(state, swarm_findings)
+
+    # Resolve issues from dismissed threads (spec §3, method #3)
+    # The signal aggregator provides resolved_threads separately from unresolved_threads
+    resolved_threads = signals.get("resolved_threads", [])
+    if resolved_threads:
+        resolve_issues_from_dismissed_threads(state, resolved_threads)
 
     # Make decision
     decision = decide(state, args.severity_floor, signals)

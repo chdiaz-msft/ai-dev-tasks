@@ -1,130 +1,119 @@
-# AI Dev Tasks
+# PR Flywheel Template
 
-Welcome to **AI Dev Tasks**! This repository provides a collection of markdown files designed to supercharge your feature development workflow with AI-powered IDEs and CLIs. These tools work with any AI coding assistant including [Amp](https://ampcode.com), Claude Code, Windsurf, and others. By leveraging these structured prompts, you can systematically approach building features, from ideation to implementation, with built-in checkpoints for verification.
+> A practical, ship-today blueprint for an autonomous PR improvement loop using free / open / GHEC-native tools.
 
-Stop wrestling with monolithic AI requests and start guiding your AI collaborator step-by-step!
+## What it is
 
-## The Core Idea
+This repository packages a PR flywheel that reviews a pull request, aggregates signals, decides whether to fix or wait, triggers remediation, and repeats until the PR is ready, blocked, or handed off.
 
-Building complex features with AI can sometimes feel like a black box. This workflow aims to bring structure, clarity, and control to the process by:
+It is designed for teams that want an auditable, bounded automation loop built on GitHub-native workflows plus optional Claude and Copilot integrations.
 
-1. **Defining Scope:** Clearly outlining what needs to be built with a Product Requirement Document (PRD).
-2. **Detailed Planning:** Breaking down the PRD into a granular, actionable task list.
-3. **Iterative Implementation:** Guiding the AI to tackle one task at a time, allowing you to review and approve each change.
+## How it works
 
-This structured approach helps ensure the AI stays on track, makes it easier to debug issues, and gives you confidence in the generated code.
+The loop runs in six stages:
 
-## Workflow: From Idea to Implemented Feature
+1. **Generate** – produce reviewer prompts and execution inputs for the current PR state.
+2. **Dispatch Review** – run the reviewer swarm and collect structured findings.
+3. **Aggregate** – combine reviewer findings, CI checks, human reviews, code scanning, and review thread state.
+4. **Decide** – determine whether to fix, wait, hand off, block, or declare ready.
+5. **Trigger Fix** – dispatch an autonomous fixer with the actionable issues.
+6. **Loop** – persist state and repeat until a terminal condition is reached.
 
-Here's the step-by-step process using the `.md` files in this repository:
+## Quick Start
 
-### 1. Create a Product Requirement Document (PRD)
+Adopt the flywheel from a consumer repository with a small caller workflow:
 
-First, lay out the blueprint for your feature. A PRD clarifies what you're building, for whom, and why.
+```yaml
+name: pr-flywheel
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
-You can create a lightweight PRD directly within your AI tool of choice:
+jobs:
+  flywheel:
+    uses: your-org/pr-flywheel-template/.github/workflows/pr-flywheel.yml@main
+    with:
+      max_iterations: 5
+      severity_floor: high
+      enable_claude: true
+      enable_copilot_agent: true
+    secrets: inherit
+```
 
-1. Ensure you have the `create-prd.md` file from this repository accessible.
-2. In your AI tool, initiate PRD creation:
+Then:
 
-    ```text
-    Use @create-prd.md
-    Here's the feature I want to build: [Describe your feature in detail]
-    Reference these files to help you: [Optional: @file1.py @file2.ts]
-    ```
+1. Install the required GitHub App or token permissions.
+2. Add the needed secrets in the consumer repo or org.
+3. Configure branch protection so generated commits and checks behave as expected.
+4. Open or update a PR to start the loop.
 
+## Configuration
 
-    ![Example of initiating PRD creation](https://pbs.twimg.com/media/Go6DDlyX0AAS7JE?format=jpg&name=large)
+| Input | Default | Description |
+| --- | --- | --- |
+| `max_iterations` | `5` | Maximum flywheel rounds before handoff. |
+| `severity_floor` | `high` | Lowest severity that becomes actionable. |
+| `enable_claude` | `true` | Enables Claude-backed review or fix steps when configured. |
+| `enable_copilot_agent` | `true` | Enables GitHub Copilot agent-based fix dispatch when configured. |
 
-### 2. Generate Your Task List from the PRD
+## Safety Rails
 
-With your PRD drafted (e.g., `MyFeature-PRD.md`), the next step is to generate a detailed, step-by-step implementation plan for your AI Developer.
+- Maximum of 5 iterations by default to prevent runaway loops.
+- Severity-floor filtering so low-signal findings do not trigger unnecessary fixes.
+- Forbidden paths support to keep automation away from sensitive files or directories.
+- Kill-switch label support so humans can stop the loop from the PR UI.
+- Audit artifacts persisted as state, signals, and decision outputs for traceability.
+- Automated commits can include a `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>` trailer.
 
-1. Ensure you have `generate-tasks.md` accessible.
-2. In your AI tool, use the PRD to create tasks:
+## Architecture
 
-    ```text
-    Now take @MyFeature-PRD.md and create tasks using @generate-tasks.md
-    ```
-    *(Note: Replace `@MyFeature-PRD.md` with the actual filename of the PRD you generated in step 1.)*
+### Core modules
 
-    ![Example of generating tasks from PRD](https://pbs.twimg.com/media/Go6FITbWkAA-RCT?format=jpg&name=medium)
+- `orchestrator/flywheel_controller.py` – state management, issue lifecycle, and next-step decisions.
+- `orchestrator/signal_aggregator.py` – normalization of swarm findings, reviews, checks, code scanning, and thread signals.
+- `orchestrator/models.py` – typed state and issue models.
+- `orchestrator/severity_classifier.py` – severity threshold filtering for actionable work.
 
-### 3. Examine Your Task List
+### Prompting and automation
 
-You'll now have a well-structured task list, often with tasks and sub-tasks, ready for the AI to start working on. This provides a clear roadmap for implementation.
+- `prompts/*` – prompt assets used by reviewer and fixer steps.
+- `.github/workflows/*` – reusable and local workflows that drive the loop.
+- `task-helpers/*` – helper scripts and task-processing utilities used in adjacent automation flows.
 
-![Example of a generated task list](https://pbs.twimg.com/media/Go6GNuOWsAEcSDm?format=jpg&name=medium)
+## Prerequisites
 
-### 4. Instruct the AI to Work Through Tasks (and Mark Completion)
+- A GitHub App or token with permission to read PRs, reviews, checks, and post workflow-driven updates.
+- An Anthropic API key if Claude-backed steps are enabled.
+- Branch protection rules configured to allow the intended bot/app behavior and required checks.
 
-To ensure methodical progress and allow for verification, instruct the AI to work through the task list one sub-task at a time.
+## Development
 
-1. In your AI tool, tell the AI to start with the first task (e.g., `1.1`):
+Run orchestrator tests with:
 
-    ```text
-    Please start on task 1.1 from the generated task list.
-    ```
+```bash
+uv run pytest orchestrator/tests/
+```
 
-    The AI will attempt the task and then prompt you to review.
+Run a focused controller test file with:
 
-    ![Example of starting on a task](https://pbs.twimg.com/media/Go6I41KWcAAAlHc?format=jpg&name=medium)
+```bash
+uv run pytest orchestrator/tests/test_flywheel_controller.py -v
+```
 
-### 5. Progress
+## Repository layout
 
-The AI will continue working through the remaining tasks in the list.
+```text
+orchestrator/          Decision engine, aggregation, models, and tests
+prompts/               Reviewer and fixer prompt assets
+.github/workflows/     Reusable workflow entry points
+task-helpers/          Supporting task execution utilities
+```
 
-![Example of a progressing task list with completed items](https://pbs.twimg.com/media/Go6KrXZWkAA_UuX?format=jpg&name=medium)
+## Status model
 
-While it's not always perfect, this method has proven to be a very reliable way to build out larger features with AI assistance.
+Issues generally move through:
 
-### Video Demonstration
+- `open` – currently actionable or awaiting resolution
+- `resolved` – cleared by reviewer absence, commit annotation, or dismissed review thread
 
-If you'd like to see this in action, I demonstrated it on [Claire Vo's "How I AI" podcast](https://www.youtube.com/watch?v=fD4ktSkNCw4).
-
-[![Demonstration of AI Dev Tasks on How I AI Podcast](https://img.youtube.com/vi/fD4ktSkNCw4/maxresdefault.jpg)](https://www.youtube.com/watch?v=fD4ktSkNCw4).
-
-## Files in this Repository
-
-* **`create-prd.md`**: Guides the AI in generating a Product Requirement Document for your feature.
-* **`generate-tasks.md`**: Takes a PRD markdown file as input and helps the AI break it down into a detailed, step-by-step implementation task list.
-
-## Benefits
-
-* **Structured Development:** Enforces a clear process from idea to code.
-* **Step-by-Step Verification:** Allows you to review and approve AI-generated code at each small step, ensuring quality and control.
-* **Manages Complexity:** Breaks down large features into smaller, digestible tasks for the AI, reducing the chance of it getting lost or generating overly complex, incorrect code.
-* **Improved Reliability:** Offers a more dependable approach to leveraging AI for significant development work compared to single, large prompts.
-* **Clear Progress Tracking:** Provides a visual representation of completed tasks, making it easy to see how much has been done and what's next.
-
-## How to Use
-
-1. **Clone or Download:** Get these `.md` files into your project or a central location where your AI tool can access them.
-   ```bash
-   git clone https://github.com/snarktank/ai-dev-tasks.git
-   ```
-2. **Follow the Workflow:** Systematically use the `.md` files in your AI assistant as described in the workflow above.
-3. **Adapt and Iterate:**
-    * Feel free to modify the prompts within the `.md` files to better suit your specific needs or coding style.
-    * If the AI struggles with a task, try rephrasing your initial feature description or breaking down tasks even further.
-
-
-
-## Tips for Success
-
-* **Be Specific:** The more context and clear instructions you provide (both in your initial feature description and any clarifications), the better the AI's output will be.
-* **Correct File Tagging:** Always ensure you're accurately tagging the PRD filename (e.g., `@MyFeature-PRD.md`) when generating tasks.
-* **Patience and Iteration:** AI is a powerful tool, but it's not magic. Be prepared to guide, correct, and iterate. This workflow is designed to make that iteration process smoother.
-
-## Contributing
-
-Got ideas to improve these `.md` files or have new ones that fit this workflow? Contributions are welcome!
-
-Please feel free to:
-
-* Open an issue to discuss changes or suggest new features.
-* Submit a pull request with your enhancements.
-
----
-
-Happy AI-assisted developing!
+Terminal loop states include `ready`, `waiting`, `blocked`, and `handoff`.

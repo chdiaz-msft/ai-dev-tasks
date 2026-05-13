@@ -484,6 +484,39 @@ class TestMergeFindings:
         assert state["issues"]["correctness-abc123"]["resolved_in_round"] == 2
 
 
+def test_resolve_issues_from_dismissed_threads():
+    """Test that dismissed threads resolve matching issues."""
+    from orchestrator.flywheel_controller import resolve_issues_from_dismissed_threads
+
+    state = {
+        "current_round": 2,
+        "issues": {
+            "correctness-abc12345": {
+                "issue_id": "correctness-abc12345",
+                "reviewer": "correctness",
+                "severity": "high",
+                "issue": "Potential null deref",
+                "file": "src/handler.py",
+                "line": 42,
+                "status": "open",
+                "resolved_in_round": None,
+                "resolution": None,
+            }
+        },
+    }
+
+    resolved_threads = [
+        {"path": "src/handler.py", "line": 43, "body": "This looks fine actually"},
+    ]
+
+    resolve_issues_from_dismissed_threads(state, resolved_threads)
+
+    issue = state["issues"]["correctness-abc12345"]
+    assert issue["status"] == "resolved"
+    assert issue["resolved_in_round"] == 2
+    assert "dismissed" in issue["resolution"].lower()
+
+
 class TestDecide:
     """Tests for decide function."""
 

@@ -9,11 +9,24 @@ This module coordinates multiple specialized reviewers (correctness, security, e
 - Handles graceful degradation when individual reviewers fail
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
+import logging
+import os
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed, TimeoutError
 from pathlib import Path
 from typing import Any
+
+try:
+    import anthropic
+except ImportError:  # pragma: no cover
+    anthropic = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
+
+_API_TIMEOUT_SECONDS = 90
 
 # List of all reviewers to dispatch
 REVIEWERS = ["correctness", "security"]
@@ -53,20 +66,81 @@ def generate_issue_id(
 
 def _call_reviewer_api(prompt: str, reviewer_input: str) -> list[dict[str, Any]]:
     """
-    Pluggable stub for calling the reviewer API.
+    Call the Anthropic Claude API to perform a code review.
 
-    This function is designed to be replaced with actual API call logic.
-    For now, it returns an empty list to support testing.
+    Sends *prompt* as the system message and *reviewer_input* as the user
+    message, then parses the structured JSON response into a list of
+    finding dicts.
 
     Args:
         prompt: System prompt for the reviewer
         reviewer_input: JSON string with diff, doctrine, and prior issues
 
     Returns:
-        List of finding dicts matching the structured schema
+        List of finding dicts matching the structured schema.
+        Returns ``[]`` on any failure (missing SDK, bad key, API error).
     """
-    # Stub implementation - to be replaced with actual API call
-    return []
+    if anthropic is None:
+        logger.warning("anthropic SDK not installed – returning empty findings")
+        return []
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.warning("ANTHROPIC_API_KEY not set – returning empty findings")
+        return []
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key, timeout=_API_TIMEOUT_SECONDS)
+
+        # Derive reviewer name from the input payload for issue-id generation
+        input_data: dict[str, Any] = json.loads(reviewer_input)
+        reviewer_name: str = input_data.get("reviewer", "unknown")
+
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            system=prompt,
+            messages=[{"role": "user", "content": reviewer_input}],
+        )
+
+        # Extract text from the response
+        raw_text = ""
+        for block in message.content:
+            if hasattr(block, "text"):
+                raw_text += block.text
+
+        # Strip markdown fences if present
+        text = raw_text.strip()
+        if text.startswith("```"):
+            first_newline = text.index("\n")
+            text = text[first_newline + 1 :]
+            if text.endswith("```"):
+                text = text[: -len("```")]
+            text = text.strip()
+
+        findings_raw: list[dict[str, Any]] = json.loads(text)
+        if not isinstance(findings_raw, list):
+            findings_raw = [findings_raw]
+
+        # Ensure every finding has a deterministic issue_id
+        findings: list[dict[str, Any]] = []
+        for item in findings_raw:
+            if not isinstance(item, dict):
+                continue
+            if not item.get("issue_id"):
+                item["issue_id"] = generate_issue_id(
+                    reviewer=item.get("reviewer", reviewer_name),
+                    file=item.get("file", ""),
+                    line=item.get("line"),
+                    issue_text=item.get("issue", ""),
+                )
+            findings.append(item)
+
+        return findings
+
+    except Exception:
+        logger.warning("Reviewer API call failed", exc_info=True)
+        return []
 
 
 def _load_prompt(reviewer: str) -> str:
@@ -118,7 +192,11 @@ def run_reviewer(
         "reviewer": reviewer,
         "diff": diff,
         "doctrine": doctrine,
-        "prior_issues": loop_state.get("issues", {}),
+        "prior_issues": {
+            k: v
+            for k, v in loop_state.get("issues", {}).items()
+            if isinstance(v, dict) and v.get("reviewer") == reviewer
+        },
     }
     reviewer_input: str = json.dumps(reviewer_input_data)
 

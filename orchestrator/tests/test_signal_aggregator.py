@@ -21,6 +21,7 @@ from orchestrator.signal_aggregator import (
     classify_review_comment,
     normalize_human_review,
     parse_code_scanning_alerts,
+    parse_resolved_threads,
     parse_unresolved_threads,
     build_signals,
 )
@@ -396,6 +397,63 @@ class TestParseUnresolvedThreads:
         assert result == []
 
 
+class TestParseResolvedThreads:
+    """Test parsing of resolved GraphQL threads."""
+
+    def test_parse_resolved_threads_extracts_resolved(self):
+        """Test parse_resolved_threads extracts resolved threads with path, line, body."""
+        graphql_json = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "isResolved": True,
+                                        "comments": {
+                                            "nodes": [
+                                                {
+                                                    "path": "src/main.py",
+                                                    "position": 42,
+                                                    "body": "Fixed now",
+                                                }
+                                            ]
+                                        },
+                                    },
+                                    {
+                                        "isResolved": False,
+                                        "comments": {
+                                            "nodes": [
+                                                {
+                                                    "path": "src/test.py",
+                                                    "position": 10,
+                                                    "body": "Still broken",
+                                                }
+                                            ]
+                                        },
+                                    },
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        result = parse_resolved_threads(graphql_json)
+
+        assert len(result) == 1
+        assert result[0]["path"] == "src/main.py"
+        assert result[0]["line"] == 42
+        assert result[0]["body"] == "Fixed now"
+
+    def test_parse_resolved_threads_invalid_json(self):
+        """Test parse_resolved_threads returns empty list for invalid JSON."""
+        result = parse_resolved_threads("not valid json")
+        assert result == []
+
+
 class TestBuildSignals:
     """Test assembling complete signals dict."""
 
@@ -504,6 +562,7 @@ class TestBuildSignals:
         assert len(result["human_reviews"]) == 1
         assert len(result["ai_reviews"]) == 1
         assert len(result["unresolved_threads"]) == 1
+        assert result["resolved_threads"] == []
         assert len(result["security"]) == 1
 
     def test_build_signals_deduplicates_findings(self, tmp_path):
@@ -583,6 +642,7 @@ class TestBuildSignals:
         assert result["human_reviews"] == []
         assert result["ai_reviews"] == []
         assert result["unresolved_threads"] == []
+        assert result["resolved_threads"] == []
         assert result["security"] == []
 
     @patch("orchestrator.signal_aggregator.parse_code_scanning_alerts")
@@ -628,3 +688,34 @@ class TestBuildSignals:
         assert result["pr_number"] == 123
         assert len(result["swarm_findings"]) == 1
         assert result["security"] == []  # Empty due to API failure
+
+    def test_build_signals_passes_resolved_threads(self, tmp_path):
+        """Test build_signals includes resolved_threads in the returned signals."""
+        swarm_data = {
+            "findings": [],
+            "reviewer_coverage": {
+                "expected": ["correctness"],
+                "completed": ["correctness"],
+                "failed": [],
+            },
+        }
+        swarm_file = tmp_path / "swarm_result.json"
+        swarm_file.write_text(json.dumps(swarm_data))
+
+        resolved_threads = [
+            {"path": "src/main.py", "line": 42, "body": "Dismissed by human"}
+        ]
+
+        result = build_signals(
+            pr_number=123,
+            head_sha="abc123",
+            swarm_path=str(swarm_file),
+            checks=[],
+            reviews=[],
+            comments=[],
+            alerts_json="[]",
+            threads_json="{}",
+            resolved_threads=resolved_threads,
+        )
+
+        assert result["resolved_threads"] == resolved_threads

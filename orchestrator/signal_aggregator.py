@@ -255,6 +255,53 @@ def parse_unresolved_threads(graphql_json: str) -> list[dict[str, Any]]:
         return []
 
 
+def parse_resolved_threads(graphql_json: str) -> list[dict[str, Any]]:
+    """
+    Parse resolved review threads from GraphQL JSON response.
+
+    Args:
+        graphql_json: JSON string from GitHub GraphQL API
+
+    Returns:
+        List of dicts with keys: path, line, body
+    """
+    if not graphql_json:
+        return []
+
+    try:
+        data = json.loads(graphql_json)
+        threads = (
+            data.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            .get("nodes", [])
+        )
+
+        result = []
+        for thread in threads:
+            if not thread.get("isResolved", False):
+                continue
+
+            comments = thread.get("comments", {}).get("nodes", [])
+            if not comments:
+                continue
+
+            first_comment = comments[0]
+            result.append(
+                {
+                    "path": first_comment.get("path", ""),
+                    "line": first_comment.get("position"),
+                    "body": first_comment.get("body", "")[:500],
+                }
+            )
+
+        return result
+    except (json.JSONDecodeError, KeyError, TypeError):
+        logger.warning("Failed to parse resolved threads, returning empty list")
+        return []
+
+
 def build_signals(
     pr_number: int,
     head_sha: str,
@@ -264,6 +311,7 @@ def build_signals(
     comments: list[Any],
     alerts_json: str,
     threads_json: str,
+    resolved_threads: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Build unified signals dict from all sources.
@@ -280,7 +328,8 @@ def build_signals(
 
     Returns:
         Dict with keys: pr_number, head_sha, swarm_findings, reviewer_coverage,
-        checks, ai_reviews, human_reviews, unresolved_threads, security
+        checks, ai_reviews, human_reviews, unresolved_threads, resolved_threads,
+        security
     """
     # Load swarm findings
     swarm_findings, reviewer_coverage = load_swarm_findings(swarm_path)
@@ -335,6 +384,7 @@ def build_signals(
         "human_reviews": human_reviews,
         "ai_reviews": ai_reviews,
         "unresolved_threads": unresolved_threads,
+        "resolved_threads": resolved_threads or [],
         "security": security_alerts,
     }
 
@@ -438,6 +488,8 @@ def main() -> None:
     if not threads_json:
         threads_json = "{}"
 
+    resolved_threads = parse_resolved_threads(threads_json)
+
     # Build unified signals
     signals = build_signals(
         pr_number=pr_number,
@@ -448,6 +500,7 @@ def main() -> None:
         comments=comments,
         alerts_json=alerts_json,
         threads_json=threads_json,
+        resolved_threads=resolved_threads,
     )
 
     # Output JSON to stdout
