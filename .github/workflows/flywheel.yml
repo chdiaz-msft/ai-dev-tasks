@@ -50,9 +50,11 @@ jobs:
        (github.event.check_suite.app.slug != 'flywheel-bot' &&
         github.event.check_suite.conclusion != 'success' &&
         !contains(github.event.check_suite.pull_requests[0].labels.*.name, 'flywheel/merge-ready'))) &&
+      (github.event_name != 'pull_request_review_comment' ||
+       github.event.comment.user.login != 'flywheel-bot[bot]') &&
       !github.event.pull_request.draft
     concurrency:
-      group: flywheel-${{ steps.pr-info.outputs.pr_number }}
+      group: flywheel-pr-${{ github.event.pull_request.number || github.event.check_suite.head_sha || github.run_id }}
       cancel-in-progress: true
     steps:
       - name: Generate GitHub App token
@@ -198,6 +200,8 @@ jobs:
       - name: Classify & decide
         if: steps.pause-check.outputs.paused != 'true'
         id: decide
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           python _flywheel/orchestrator/flywheel_controller.py --signals signals.json --max-iter ${{ inputs.max_iterations }} --severity-floor ${{ inputs.severity_floor }} --out decision.json
 
@@ -207,6 +211,19 @@ jobs:
         with:
           path: state/loop-state.json
           key: flywheel-state-pr-${{ steps.pr-info.outputs.pr_number }}-round-${{ steps.decide.outputs.iteration }}
+
+      - name: Upload flywheel artifacts
+        if: steps.pause-check.outputs.paused != 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flywheel-round-${{ steps.decide.outputs.iteration || '0' }}
+          path: |
+            decision.json
+            state/loop-state.json
+            signals.json
+            swarm_result.json
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Run Claude Code fix
         if: steps.pause-check.outputs.paused != 'true' && fromJson(steps.decide.outputs.dispatch).agent == 'claude' && inputs.enable_claude
@@ -235,6 +252,28 @@ jobs:
             Begin by reading `decision.json` and `_flywheel/prompts/claude-fix-prompt.md`.
           allowed_tools: "Bash,Edit,Read,Write,Grep"
           max_turns: 30
+
+      - name: Run Copilot Agent fix
+        if: steps.pause-check.outputs.paused != 'true' && fromJson(steps.decide.outputs.dispatch).agent == 'copilot' && inputs.enable_copilot_agent
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          echo "Dispatching fix to GitHub Copilot Coding Agent..."
+
+          # Extract issue descriptions for Copilot
+          issues=$(jq -r '.dispatch.items[] | "- [\(.issue_id)] \(.file):\(.line // "N/A") — \(.issue)"' decision.json)
+
+          # Create a comment on the PR to trigger Copilot
+          gh pr comment ${{ steps.pr-info.outputs.pr_number }} --body "$(cat <<-EOF
+          @copilot Please fix the following issues identified by the PR Flywheel:
+
+          ${issues}
+
+          Refer to \`_flywheel/prompts/claude-fix-prompt.md\` for fix guidelines.
+          Include \`[resolves: <issue_id>]\` in your commit message for each fixed issue.
+          EOF
+          )"
 
       - name: Validate changed paths against allowlist
         if: steps.pause-check.outputs.paused != 'true' && steps.decide.outputs.has_changes == 'true'
@@ -317,3 +356,69 @@ jobs:
           sha: ${{ steps.pr-info.outputs.head_sha }}
           output: |
             {"summary":"PR is ready to merge after ${{ steps.decide.outputs.iteration }} flywheel iteration(s) with severity floor: ${{ inputs.severity_floor }}","text":"All actionable issues have been resolved. No blocking findings remain at or above the '${{ inputs.severity_floor }}' severity threshold."}
+
+      - name: Post flywheel status comment
+        if: steps.pause-check.outputs.paused != 'true' && steps.decide.outputs.state != 'fixing'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DECISION_STATE: ${{ steps.decide.outputs.state }}
+          ITERATION: ${{ steps.decide.outputs.iteration }}
+          PR_NUMBER: ${{ steps.pr-info.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+
+          case "$DECISION_STATE" in
+            ready)
+              BODY="## ✅ Flywheel Complete — Ready for Review
+
+          All issues at or above **${{ inputs.severity_floor }}** severity have been resolved across **${ITERATION}** iteration(s).
+
+          The \`flywheel/merge-ready\` status check has been posted. A human reviewer must approve before merging.
+
+          <details>
+          <summary>Flywheel summary</summary>
+
+          - Iterations: ${ITERATION}
+          - Severity floor: ${{ inputs.severity_floor }}
+          - Status: All actionable issues resolved
+          </details>"
+              ;;
+            waiting)
+              REASON=$(jq -r '.reason // "unknown"' decision.json)
+              BODY="## ⏸️ Flywheel Waiting
+
+          The flywheel has paused after **${ITERATION}** iteration(s).
+
+          **Reason:** ${REASON}
+
+          The flywheel will resume automatically when conditions change (e.g., checks pass, reviewer coverage completes)."
+              ;;
+            handoff)
+              OPEN_ISSUES=$(jq -r '.open_issues // [] | length' decision.json)
+              BODY="## 🤝 Flywheel Handoff — Human Attention Needed
+
+          The flywheel has reached the maximum iteration limit (**${ITERATION}** rounds) with **${OPEN_ISSUES}** unresolved issue(s).
+
+          <details>
+          <summary>Remaining issues</summary>
+
+          $(jq -r '.open_issues[]? // empty' decision.json | sed 's/^/- /')
+          </details>
+
+          Please review the remaining issues and address them manually."
+              ;;
+            blocked)
+              BODY="## 🛑 Flywheel Blocked
+
+          A human reviewer has submitted **Request Changes**. The flywheel has stopped all automation.
+
+          The flywheel will not run again on this PR until the rejection is resolved (e.g., the reviewer approves or dismisses their review)."
+              ;;
+            *)
+              echo "No comment needed for state: $DECISION_STATE"
+              exit 0
+              ;;
+          esac
+
+          # Post the comment
+          gh pr comment "$PR_NUMBER" --body "$BODY"
