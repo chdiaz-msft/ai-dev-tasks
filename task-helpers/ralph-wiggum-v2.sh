@@ -18,11 +18,18 @@ set -euo pipefail
 #   - [ ] Check that Y passes
 #
 # Options:
-#   --model <model>              Claude model to use (default: sonnet)
+#   --engine <claude|copilot>    Headless agent CLI to drive (default: claude)
+#   --model <model>              Model to use (default: sonnet for claude;
+#                                mapped to claude-sonnet-4.6 for copilot)
 #   --max-retries <n>            Max retries per task before giving up (default: 2)
-#   --max-budget-usd <n>         Max budget per Claude call in USD (default: 5)
-#   --permission-mode <mode>     Permission mode for Claude (default: auto)
-#   --system-prompt-file <path>  Prompt file to append to each Claude call
+#   --max-budget-usd <n>         Max budget per call in USD (default: 5; claude only,
+#                                ignored for copilot which has no budget flag)
+#   --permission-mode <mode>     Permission mode for Claude (default: auto; claude only)
+#   --system-prompt-file <path>  Prompt file injected into each call
+#                                (--append-system-prompt for claude; prepended into
+#                                the prompt text for copilot)
+#   --selfcorrect, -s            On failure, make an agent call to diagnose and fix
+#                                the root cause before retrying (skipped for BLOCKED)
 #   --print-only                 Dry run — print tasks without executing
 #   --verbose, -v                Verbose debug logging for troubleshooting
 
@@ -45,12 +52,15 @@ verbose() { $VERBOSE && echo -e "${CYAN}[ralph:debug]${NC} $*" >&2 || true; }
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 
-MODEL="sonnet"
+ENGINE="claude"
+MODEL=""              # empty = engine-specific default (see model defaulting below)
 MAX_RETRIES=2
 MAX_BUDGET_USD=5
+MAX_BUDGET_USD_DEFAULT=5
 PERMISSION_MODE="bypassPermissions"
 PRINT_ONLY=false
 VERBOSE=false
+SELFCORRECT=false
 SYSTEM_PROMPT_FILE=""
 
 # ── Arg parsing ──────────────────────────────────────────────────────────────
@@ -59,11 +69,13 @@ TASKS_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --engine)             ENGINE="$2"; shift 2 ;;
     --model)              MODEL="$2"; shift 2 ;;
     --max-retries)        MAX_RETRIES="$2"; shift 2 ;;
     --max-budget-usd)     MAX_BUDGET_USD="$2"; shift 2 ;;
     --permission-mode)    PERMISSION_MODE="$2"; shift 2 ;;
     --system-prompt-file) SYSTEM_PROMPT_FILE="$2"; shift 2 ;;
+    --selfcorrect|-s)     SELFCORRECT=true; shift ;;
     --print-only)         PRINT_ONLY=true; shift ;;
     --verbose|-v)         VERBOSE=true; shift ;;
     -h|--help)
@@ -95,6 +107,30 @@ if [[ ! -f "$TASKS_FILE" ]]; then
   err "Tasks file not found: $TASKS_FILE"
   exit 1
 fi
+
+# ── Engine validation, model defaulting & preflight ──────────────────────────
+
+case "$ENGINE" in
+  claude)
+    : "${MODEL:=sonnet}"
+    ;;
+  copilot)
+    # Map the claude default to a copilot model id; explicit --model passes through.
+    : "${MODEL:=claude-sonnet-4.6}"
+    if ! $PRINT_ONLY && ! command -v copilot >/dev/null 2>&1; then
+      err "--engine copilot requires the 'copilot' CLI on PATH (https://docs.github.com/copilot/concepts/agents/about-copilot-cli)"
+      exit 1
+    fi
+    # Copilot CLI has no budget flag; warn if the user set one explicitly.
+    if [[ "$MAX_BUDGET_USD" != "$MAX_BUDGET_USD_DEFAULT" ]]; then
+      warn "--max-budget-usd is ignored for --engine copilot (no budget flag in Copilot CLI)"
+    fi
+    ;;
+  *)
+    err "Invalid --engine '$ENGINE' (expected: claude | copilot)"
+    exit 1
+    ;;
+esac
 
 TASKS_FILE="$(realpath "$TASKS_FILE")"
 TASKS_DIR="$(dirname "$TASKS_FILE")"
@@ -229,39 +265,71 @@ count_tasks() {
   run_parser count "$TASKS_FILE"
 }
 
-# ── Run Claude headless ──────────────────────────────────────────────────────
+# ── Run agent headless (claude or copilot) ───────────────────────────────────
+# Both engines run the prompt non-interactively with autonomous tool use and
+# print the agent's response to stdout. The caller parses that output for the
+# TASK_STATUS:/VERIFICATION_RESULT: line and checks the task file for [x] marks,
+# which is engine-agnostic.
 
-run_claude() {
+run_agent() {
   local prompt="$1"
   local output
 
   if $PRINT_ONLY; then
-    log "(dry run) Would send to Claude:"
+    log "(dry run) Would send to $ENGINE:"
     echo ""
     echo "$prompt"
     echo ""
     if [[ -n "$SYSTEM_PROMPT_CONTENT" ]]; then
-      log "(dry run) With appended system prompt (${#SYSTEM_PROMPT_CONTENT} chars)"
+      if [[ "$ENGINE" == "copilot" ]]; then
+        log "(dry run) With system prompt prepended into the prompt (${#SYSTEM_PROMPT_CONTENT} chars)"
+      else
+        log "(dry run) With appended system prompt (${#SYSTEM_PROMPT_CONTENT} chars)"
+      fi
     fi
+    log "(dry run) Invocation: $(agent_cmdline_preview)"
     return 0
   fi
 
-  local -a claude_args=(
-    -p
-    --model "$MODEL"
-    --permission-mode "$PERMISSION_MODE"
-    --max-budget-usd "$MAX_BUDGET_USD"
-  )
+  local -a cmd
+  case "$ENGINE" in
+    copilot)
+      # Copilot CLI has no --append-system-prompt: prepend the instructions into
+      # the prompt text. -s = clean stdout for parsing; --allow-all-tools = run
+      # tools without approval; --no-ask-user = never pause for clarification.
+      local final_prompt="$prompt"
+      if [[ -n "$SYSTEM_PROMPT_CONTENT" ]]; then
+        final_prompt="$SYSTEM_PROMPT_CONTENT
 
-  if [[ -n "$SYSTEM_PROMPT_CONTENT" ]]; then
-    claude_args+=(--append-system-prompt "$SYSTEM_PROMPT_CONTENT")
-  fi
+$prompt"
+      fi
+      cmd=(
+        copilot
+        -p "$final_prompt"
+        --model "$MODEL"
+        --allow-all-tools
+        -s
+        --no-ask-user
+      )
+      ;;
+    *)
+      cmd=(
+        claude
+        -p
+        --model "$MODEL"
+        --permission-mode "$PERMISSION_MODE"
+        --max-budget-usd "$MAX_BUDGET_USD"
+      )
+      if [[ -n "$SYSTEM_PROMPT_CONTENT" ]]; then
+        cmd+=(--append-system-prompt "$SYSTEM_PROMPT_CONTENT")
+      fi
+      cmd+=("$prompt")
+      ;;
+  esac
 
-  claude_args+=("$prompt")
-
-  output=$(claude "${claude_args[@]}" 2>&1) || {
+  output=$("${cmd[@]}" 2>&1) || {
     local exit_code=$?
-    err "Claude exited with code $exit_code"
+    err "$ENGINE exited with code $exit_code"
     echo "$output"
     return $exit_code
   }
@@ -270,11 +338,111 @@ run_claude() {
   return 0
 }
 
+# Human-readable preview of the engine invocation (for --print-only logging).
+# Avoids dumping the full prompt; shows the flag shape only.
+agent_cmdline_preview() {
+  case "$ENGINE" in
+    copilot) echo "copilot -p <prompt> --model $MODEL --allow-all-tools -s --no-ask-user" ;;
+    *)       echo "claude -p --model $MODEL --permission-mode $PERMISSION_MODE --max-budget-usd $MAX_BUDGET_USD ${SYSTEM_PROMPT_CONTENT:+--append-system-prompt <...> }<prompt>" ;;
+  esac
+}
+
+# ── Self-correction agent call ───────────────────────────────────────────────
+# When --selfcorrect is active, this function is called after a task failure
+# (but before the retry). It gives an agent the failure output and asks it to
+# diagnose and fix the root cause in the codebase or task file.
+#
+# Arguments:
+#   $1 — task_desc (the failing task description)
+#   $2 — parent_text (parent task context, may be empty)
+#   $3 — status_type (PARTIAL|COMPLETE|"" for crash/no-status)
+#   $4 — status_detail (detail from TASK_STATUS line, may be empty)
+#   $5 — task_output (full output from the failing agent call)
+#   $6 — attempt_number (which retry attempt triggered this)
+#
+# Returns 0 on success, non-zero on failure (caller should ignore failures).
+
+run_selfcorrect() {
+  local task_desc="$1"
+  local parent_text="$2"
+  local status_type="$3"
+  local status_detail="$4"
+  local task_output="$5"
+  local attempt_num="$6"
+
+  log "Self-correcting: analyzing failure and attempting fix..."
+
+  local failure_context=""
+  if [[ -n "$status_type" ]]; then
+    failure_context="The agent reported status: $status_type — $status_detail"
+  else
+    failure_context="The agent crashed or produced no parseable TASK_STATUS line."
+  fi
+
+  local selfcorrect_prompt="You are a self-correction agent. A task execution just failed, and your job is to analyze the failure and fix the root cause so the task can succeed on retry.
+
+## Context
+
+Task file: @$TASKS_FILE — read it for full context.
+Failed task: $task_desc
+${parent_text:+Parent task: $parent_text}
+
+## What went wrong
+
+$failure_context
+
+## Output from the failing attempt
+
+\`\`\`
+$task_output
+\`\`\`
+
+## Your Instructions
+
+1. Analyze the failure output above to identify the root cause.
+2. Determine if the failure can be fixed by modifying code, configuration, or the task file itself.
+3. If fixable: make the necessary changes (edit code, fix config, update the task file with better instructions, etc.)
+4. If NOT fixable by a coding agent (requires human intervention, external access, etc.): do nothing — just explain why.
+5. Do NOT mark the task as complete — the retry will handle that.
+6. Do NOT attempt to re-run the original task — just fix the underlying issue.
+
+As the VERY LAST line of your response, output exactly one of:
+  SELFCORRECT_RESULT: FIXED — <what you changed>
+  SELFCORRECT_RESULT: UNFIXABLE — <why it cannot be fixed by a coding agent>
+  SELFCORRECT_RESULT: ATTEMPTED — <what you tried but are unsure if it will work>"
+
+  local selfcorrect_log="$LOG_DIR/task_$(printf '%02d' $task_number)_selfcorrect_attempt_${attempt_num}.log"
+
+  local sc_output
+  if sc_output=$(run_agent "$selfcorrect_prompt"); then
+    echo "$sc_output" > "$selfcorrect_log"
+    log "Self-correct output saved to: $selfcorrect_log"
+
+    # Parse the result for logging
+    local sc_result_line
+    sc_result_line=$(echo "$sc_output" | grep -i "^SELFCORRECT_RESULT:" | tail -1 || true)
+    if [[ -n "$sc_result_line" ]]; then
+      ok "Self-correct: $sc_result_line"
+    else
+      warn "Self-correct: no SELFCORRECT_RESULT line found (check log)"
+    fi
+    return 0
+  else
+    echo "$sc_output" > "$selfcorrect_log" 2>/dev/null || true
+    warn "Self-correct call failed (non-fatal) — log: $selfcorrect_log"
+    return 1
+  fi
+}
+
 # ── Main loop ────────────────────────────────────────────────────────────────
 
 header "Ralph Wiggum Loop"
 log "Tasks file: $TASKS_FILE"
-log "Model: $MODEL | Max retries: $MAX_RETRIES | Budget/call: \$$MAX_BUDGET_USD | Verbose: $VERBOSE"
+if [[ "$ENGINE" == "copilot" ]]; then
+  log "Engine: $ENGINE | Model: $MODEL | Max retries: $MAX_RETRIES | Self-correct: $SELFCORRECT | Verbose: $VERBOSE"
+else
+  log "Engine: $ENGINE | Model: $MODEL | Max retries: $MAX_RETRIES | Budget/call: \$$MAX_BUDGET_USD | Self-correct: $SELFCORRECT | Verbose: $VERBOSE"
+fi
 if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
   log "System prompt: $SYSTEM_PROMPT_FILE"
 fi
@@ -373,10 +541,10 @@ IMPORTANT — as the VERY LAST line of your response, output exactly ONE of thes
 Use BLOCKED for tasks that are impossible, nonsensical, or outside your capabilities as a software agent. Do not fabricate success.
 This status line is machine-parsed. Do not omit it."
 
-    log "Calling Claude..."
+    log "Calling $ENGINE..."
     task_log="$LOG_DIR/task_$(printf '%02d' $task_number)_$(echo "$task_desc" | tr -c '[:alnum:]-' '_' | cut -c1-60).log"
 
-    if output=$(run_claude "$prompt"); then
+    if output=$(run_agent "$prompt"); then
       # Save full output to log file
       echo "$output" > "$task_log"
       log "Full output saved to: $task_log"
@@ -444,6 +612,10 @@ This status line is machine-parsed. Do not omit it."
           any_failures=true
           break
         fi
+        # Self-correct before retry
+        if $SELFCORRECT; then
+          run_selfcorrect "$task_desc" "$parent_text" "$status_type" "$status_detail" "$output" "$retries" || true
+        fi
         # Add failure context to next retry prompt
         parent_context="$parent_context
 Previous attempt reported: PARTIAL — $status_detail
@@ -462,6 +634,10 @@ Please pick up where the previous attempt left off."
           any_failures=true
           break
         fi
+        # Self-correct before retry
+        if $SELFCORRECT; then
+          run_selfcorrect "$task_desc" "$parent_text" "$status_type" "$status_detail" "$output" "$retries" || true
+        fi
 
       else
         # No status line or unrecognized — fall back to file check
@@ -475,6 +651,10 @@ Please pick up where the previous attempt left off."
         fi
           any_failures=true
           break
+        fi
+        # Self-correct before retry
+        if $SELFCORRECT; then
+          run_selfcorrect "$task_desc" "$parent_text" "" "" "$output" "$retries" || true
         fi
       fi
 
@@ -492,6 +672,10 @@ Please pick up where the previous attempt left off."
         fi
         any_failures=true
         break
+      fi
+      # Self-correct before retry
+      if $SELFCORRECT; then
+        run_selfcorrect "$task_desc" "$parent_text" "" "" "$output" "$retries" || true
       fi
     fi
   done
@@ -567,7 +751,7 @@ or
 VERIFICATION_RESULT: FAIL - <reason>"
 
 if $PRINT_ONLY; then
-  run_claude "$verify_prompt"
+  run_agent "$verify_prompt"
   ok "RESULT: DRY RUN COMPLETE — verification would run here"
   exit 0
 fi
@@ -575,7 +759,7 @@ fi
 mkdir -p "$LOG_DIR"
 verify_log="$LOG_DIR/verification.log"
 
-if verify_output=$(run_claude "$verify_prompt"); then
+if verify_output=$(run_agent "$verify_prompt"); then
   echo "$verify_output" > "$verify_log"
   log "Verification log saved to: $verify_log"
   echo "$verify_output" | tail -30
@@ -635,7 +819,7 @@ Apply these steps to the feature folder containing that task file."
       verbose "Feature completion: prompt length=${#complete_run_prompt} chars"
 
       if $PRINT_ONLY; then
-        run_claude "$complete_run_prompt"
+        run_agent "$complete_run_prompt"
         ok "RESULT: DRY RUN COMPLETE — feature completion would run here"
         exit 0
       fi
@@ -643,7 +827,7 @@ Apply these steps to the feature folder containing that task file."
       mkdir -p "$LOG_DIR"
       complete_log="$LOG_DIR/complete-feature.log"
 
-      if complete_output=$(run_claude "$complete_run_prompt"); then
+      if complete_output=$(run_agent "$complete_run_prompt"); then
         # Re-create LOG_DIR in case feature completion moved the parent folder
         if [[ ! -d "$LOG_DIR" ]]; then
           warn "LOG_DIR disappeared during feature completion (folder likely moved) — recreating"
