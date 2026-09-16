@@ -49,10 +49,13 @@ class TestCLIHelpOutput:
 
         # Check for all required commands
         assert "next-task" in help_output
+        assert "next-parent" in help_output
         assert "count" in help_output
         assert "mark-complete" in help_output
         assert "mark-failed" in help_output
+        assert "mark-subtree-failed" in help_output
         assert "is-complete" in help_output
+        assert "is-subtree-resolved" in help_output
         assert "auto-complete-parents" in help_output
         assert "verification-section" in help_output
         assert "validate" in help_output
@@ -113,6 +116,191 @@ class TestNextTaskCommand:
         # Should run without argument parsing errors
         # (May fail later due to missing file, but argparse should succeed)
         assert result.returncode in [0, 3]  # 0 = success, 3 = command error
+
+
+class TestNextParentCommand:
+    """Test argument parsing and output for next-parent command."""
+
+    def test_next_parent_help(self):
+        """next-parent --help should show command-specific help."""
+        result = subprocess.run(
+            [sys.executable, str(TASK_PARSER), "next-parent", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "next-parent" in result.stdout
+        assert "file" in result.stdout.lower()
+
+    def test_next_parent_returns_full_top_level_task_context(self, tmp_path):
+        """next-parent should return metadata followed by the complete task subtree."""
+        task_file = tmp_path / "tasks.md"
+        task_file.write_text(
+            """## Tasks
+
+- [x] 1.0 Completed parent
+  - [x] 1.1 Completed child
+- [ ] 2.0 Implement feature
+  Parent-level implementation notes.
+  - [x] 2.1 Existing setup
+  - [ ] 2.2 Add behavior
+    - [ ] 2.2.1 Add nested case
+  - [ ] 2.3 Add tests
+- [ ] 3.0 Later parent
+  - [ ] 3.1 Do later work
+
+## Verification Criteria
+
+- [ ] Tests pass
+""",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [sys.executable, str(TASK_PARSER), "next-parent", str(task_file)],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        lines = result.stdout.splitlines()
+        assert lines[0] == "5|10|2.0 Implement feature"
+        assert "\n".join(lines[1:]) == (
+            "- [ ] 2.0 Implement feature\n"
+            "  Parent-level implementation notes.\n"
+            "  - [x] 2.1 Existing setup\n"
+            "  - [ ] 2.2 Add behavior\n"
+            "    - [ ] 2.2.1 Add nested case\n"
+            "  - [ ] 2.3 Add tests"
+        )
+
+    def test_next_parent_returns_leaf_as_its_own_context(self, tmp_path):
+        """A top-level leaf task should be returned as a one-line parent context."""
+        task_file = tmp_path / "tasks.md"
+        task_file.write_text(
+            """## Tasks
+
+- [x] 1.0 Completed task
+- [ ] 2.0 Standalone task
+
+## Verification Criteria
+""",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [sys.executable, str(TASK_PARSER), "next-parent", str(task_file)],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout == "4|4|2.0 Standalone task\n- [ ] 2.0 Standalone task\n"
+
+
+class TestIsSubtreeResolvedCommand:
+    """Test subtree resolution checks used by parent-task execution."""
+
+    def test_incomplete_descendant_returns_one(self, tmp_path):
+        task_file = tmp_path / "tasks.md"
+        task_file.write_text(
+            """## Tasks
+
+- [x] 1.0 Parent marked too early
+  - [x] 1.1 Complete child
+  - [ ] 1.2 Incomplete child
+""",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(TASK_PARSER),
+                "is-subtree-resolved",
+                str(task_file),
+                "--line",
+                "3",
+                "--match",
+                "1.0 Parent marked too early",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 1
+
+    def test_complete_and_failed_descendants_return_zero(self, tmp_path):
+        task_file = tmp_path / "tasks.md"
+        task_file.write_text(
+            """## Tasks
+
+- [ ] 1.0 Parent
+  - [x] 1.1 Complete child
+  - [!] 1.2 Blocked child
+""",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(TASK_PARSER),
+                "is-subtree-resolved",
+                str(task_file),
+                "--line",
+                "3",
+                "--match",
+                "1.0 Parent",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+
+
+class TestMarkSubtreeFailedCommand:
+    """Test atomic failure marking for parent-task execution."""
+
+    def test_marks_only_incomplete_tasks_in_subtree_failed(self, tmp_path):
+        task_file = tmp_path / "tasks.md"
+        task_file.write_text(
+            """## Tasks
+
+- [ ] 1.0 Parent
+  - [x] 1.1 Complete child
+  - [ ] 1.2 Incomplete child
+    - [ ] 1.2.1 Nested incomplete child
+- [ ] 2.0 Unrelated parent
+  - [ ] 2.1 Unrelated child
+""",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(TASK_PARSER),
+                "mark-subtree-failed",
+                str(task_file),
+                "--line",
+                "3",
+                "--match",
+                "1.0 Parent",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        content = task_file.read_text(encoding="utf-8")
+        assert "- [!] 1.0 Parent" in content
+        assert "  - [x] 1.1 Complete child" in content
+        assert "  - [!] 1.2 Incomplete child" in content
+        assert "    - [!] 1.2.1 Nested incomplete child" in content
+        assert "- [ ] 2.0 Unrelated parent" in content
+        assert "  - [ ] 2.1 Unrelated child" in content
 
 
 class TestCountCommand:

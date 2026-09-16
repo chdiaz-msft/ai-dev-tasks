@@ -6,13 +6,13 @@ This repository is a **prompt and tooling collection** for structured AI-assiste
 
 ## Architecture
 
-### Prompt Files (root)
+### Prompt Files (`task-helpers/`)
 
 Three core prompt files drive the workflow. They use Claude's frontmatter format (`---` header with `description`, `globs`, `alwaysApply`):
 
-- `create-prd.prompt.md` — Guides PRD creation. Saves output to `/tasks/[feature-name]/prd-[feature-name].md`
-- `generate-tasks.prompt.md` — Converts a PRD into a TDD task list. Saves to `/tasks/tasks-[prd-file-name].md`
-- `complete-feature.prompt.md` — Verifies completion, renames files with `completed-` prefix, moves to `tasks/completed/`
+- `task-helpers/create-prd.prompt.md` — Guides PRD creation. Saves output to `/tasks/[feature-name]/prd-[feature-name].md`
+- `task-helpers/generate-tasks.prompt.md` — Converts a PRD into a TDD task list. Saves to `/tasks/tasks-[prd-file-name].md`
+- `task-helpers/complete-feature.prompt.md` — Verifies completion, renames files with `completed-` prefix, moves to `tasks/completed/`
 
 ### Task Execution (`task-helpers/`)
 

@@ -1,7 +1,6 @@
 {
   "permissions": {
     "allow": [
-      "Bash(bash ./ralph-wiggum.sh ./task-parser-rewrite/tasks-prd-task-parser-rewrite.md)",
       "Bash(git add:*)",
       "Bash(git rm:*)",
       "Bash(git commit:*)",
@@ -14,7 +13,8 @@
       "Bash(ls c:/git/jacob-ai-dev-tasks/*.prompt.md c:/git/jacob-ai-dev-tasks/task-helpers/*.prompt.md)",
       "Bash(git push:*)",
       "Skill(commit-commands:commit)",
-      "Skill(commit-commands:commit:*)"
+      "Skill(commit-commands:commit:*)",
+      "Bash(bash -n task-helpers/ralph-wiggum-v2.sh)"
     ]
   }
 }

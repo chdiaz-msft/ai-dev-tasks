@@ -10,8 +10,8 @@ This tool parses markdown task files with checkbox-based task lists,
 providing commands for reading task status, counting tasks, marking tasks
 complete/failed, and extracting verification sections.
 
-Designed to replace fragile bash parsing in ralph-wiggum.sh with robust
-Python-based task file manipulation.
+Provides robust Python-based task file manipulation for the Ralph Wiggum
+automation harness.
 """
 
 import argparse
@@ -363,10 +363,13 @@ def main() -> None:
         epilog="""
 Examples:
   %(prog)s next-task tasks.md
+  %(prog)s next-parent tasks.md
   %(prog)s count tasks.md
   %(prog)s mark-complete tasks.md 42
   %(prog)s mark-failed tasks.md "implement feature X"
+  %(prog)s mark-subtree-failed tasks.md --line 42 --match "parent task"
   %(prog)s is-complete tasks.md 42
+  %(prog)s is-subtree-resolved tasks.md --line 42 --match "parent task"
   %(prog)s auto-complete-parents tasks.md
   %(prog)s verification-section tasks.md
   %(prog)s validate tasks.md
@@ -381,6 +384,13 @@ Examples:
         help="Get the next incomplete leaf task"
     )
     parser_next.add_argument("file", help="Path to the task file")
+
+    # next-parent command
+    parser_next_parent = subparsers.add_parser(
+        "next-parent",
+        help="Get the next incomplete top-level task and its full markdown subtree"
+    )
+    parser_next_parent.add_argument("file", help="Path to the task file")
 
     # count command
     parser_count = subparsers.add_parser(
@@ -431,6 +441,24 @@ Examples:
         help="Hint: expected task description for verification"
     )
 
+    # mark-subtree-failed command
+    parser_mark_subtree_failed = subparsers.add_parser(
+        "mark-subtree-failed",
+        help="Mark every incomplete task in a parent subtree as failed [!]"
+    )
+    parser_mark_subtree_failed.add_argument("file", help="Path to the task file")
+    parser_mark_subtree_failed.add_argument(
+        "--line",
+        type=int,
+        required=True,
+        help="Expected parent task line number"
+    )
+    parser_mark_subtree_failed.add_argument(
+        "--match",
+        required=True,
+        help="Expected parent task description"
+    )
+
     # is-complete command
     parser_is_complete = subparsers.add_parser(
         "is-complete",
@@ -450,6 +478,24 @@ Examples:
     parser_is_complete.add_argument(
         "--match",
         help="Hint: expected task description for verification"
+    )
+
+    # is-subtree-resolved command
+    parser_is_subtree_resolved = subparsers.add_parser(
+        "is-subtree-resolved",
+        help="Check whether a task subtree has no incomplete leaf tasks"
+    )
+    parser_is_subtree_resolved.add_argument("file", help="Path to the task file")
+    parser_is_subtree_resolved.add_argument(
+        "--line",
+        type=int,
+        required=True,
+        help="Expected parent task line number"
+    )
+    parser_is_subtree_resolved.add_argument(
+        "--match",
+        required=True,
+        help="Expected parent task description"
     )
 
     # auto-complete-parents command
@@ -479,14 +525,20 @@ Examples:
     try:
         if args.command == "next-task":
             cmd_next_task(args.file)
+        elif args.command == "next-parent":
+            cmd_next_parent(args.file)
         elif args.command == "count":
             cmd_count(args.file)
         elif args.command == "mark-complete":
             cmd_mark_complete(args.file, args.identifier, args.line, args.match)
         elif args.command == "mark-failed":
             cmd_mark_failed(args.file, args.identifier, args.line, args.match)
+        elif args.command == "mark-subtree-failed":
+            cmd_mark_subtree_failed(args.file, args.line, args.match)
         elif args.command == "is-complete":
             cmd_is_complete(args.file, args.identifier, args.line, args.match)
+        elif args.command == "is-subtree-resolved":
+            cmd_is_subtree_resolved(args.file, args.line, args.match)
         elif args.command == "auto-complete-parents":
             cmd_auto_complete_parents(args.file)
         elif args.command == "verification-section":
@@ -675,6 +727,63 @@ def cmd_next_task(file_path: str) -> None:
     sys.exit(1)
 
 
+def cmd_next_parent(file_path: str) -> None:
+    """Get the top-level task containing the next incomplete leaf task.
+
+    The first output line is pipe-delimited metadata:
+    start_line|end_line|parent_text.
+    The remaining output is the complete markdown block for that top-level task,
+    including prose, nested subtasks, and their current completion state.
+    Exits 1 if no incomplete leaf tasks remain.
+    Exits 3 if the file cannot be read.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        sys.exit(3)
+    except Exception as e:
+        print(f"Error reading file: {e}", file=sys.stderr)
+        sys.exit(3)
+
+    tasks = parse_task_file(content)
+    next_leaf = next(
+        (
+            task
+            for task in tasks
+            if task.status == "incomplete" and not task.children
+        ),
+        None,
+    )
+    if next_leaf is None:
+        sys.exit(1)
+
+    parent = next_leaf
+    while parent.parent is not None:
+        parent = parent.parent
+
+    section_range = find_tasks_section(content)
+    if section_range is None:
+        sys.exit(1)
+
+    _, section_end = section_range
+    block_end = section_end
+    for task in tasks:
+        if task.parent is None and task.line_number > parent.line_number:
+            block_end = task.line_number - 1
+            break
+
+    lines = content.splitlines()
+    block_lines = lines[parent.line_number - 1:block_end]
+    while block_lines and not block_lines[-1].strip():
+        block_lines.pop()
+    block_end = parent.line_number + len(block_lines) - 1
+
+    print(f"{parent.line_number}|{block_end}|{parent.text}")
+    print("\n".join(block_lines))
+
+
 def cmd_count(file_path: str) -> None:
     """Count tasks by status.
 
@@ -813,6 +922,63 @@ def cmd_mark_failed(
     _mark_task_status(file_path, '!', identifier, line, match)
 
 
+def cmd_mark_subtree_failed(file_path: str, line: int, match: str) -> None:
+    """Mark every incomplete task in a task subtree as failed [!]."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        sys.exit(3)
+    except Exception as e:
+        print(f"Error reading file: {e}", file=sys.stderr)
+        sys.exit(3)
+
+    tasks = parse_task_file(content)
+    try:
+        root = resolve_task(tasks, line=line, match=match)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(3)
+
+    def subtree_tasks(task: Task) -> list[Task]:
+        return [
+            task,
+            *(
+                descendant
+                for child in task.children
+                for descendant in subtree_tasks(child)
+            ),
+        ]
+
+    lines = content.splitlines(keepends=True)
+    for task in subtree_tasks(root):
+        if task.status != "incomplete":
+            continue
+
+        target_line_idx = task.line_number - 1
+        original_line = lines[target_line_idx]
+        checkbox_match = CHECKBOX_PATTERN.match(original_line.rstrip('\n\r'))
+        if not checkbox_match:
+            print(
+                f"Error: Line {task.line_number} does not contain a valid checkbox",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+
+        indent = checkbox_match.group(1)
+        text = checkbox_match.group(3)
+        line_ending = original_line[len(original_line.rstrip('\n\r')):]
+        lines[target_line_idx] = f"{indent}- [!] {text}{line_ending}"
+
+    try:
+        atomic_write(file_path, ''.join(lines))
+    except Exception as e:
+        print(f"Error writing file: {e}", file=sys.stderr)
+        sys.exit(3)
+    sys.exit(0)
+
+
 def cmd_is_complete(
     file_path: str,
     identifier: str | None = None,
@@ -849,6 +1015,43 @@ def cmd_is_complete(
         sys.exit(0)
     else:
         sys.exit(1)
+
+
+def cmd_is_subtree_resolved(file_path: str, line: int, match: str) -> None:
+    """Check whether a task subtree contains no incomplete leaf tasks.
+
+    Exits 0 when every leaf is complete or failed, 1 when any leaf remains
+    incomplete, and 3 when the task cannot be resolved.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        sys.exit(3)
+    except Exception as e:
+        print(f"Error reading file: {e}", file=sys.stderr)
+        sys.exit(3)
+
+    tasks = parse_task_file(content)
+    try:
+        root = resolve_task(tasks, line=line, match=match)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(3)
+
+    def leaf_tasks(task: Task) -> list[Task]:
+        if not task.children:
+            return [task]
+        return [
+            leaf
+            for child in task.children
+            for leaf in leaf_tasks(child)
+        ]
+
+    if any(task.status == "incomplete" for task in leaf_tasks(root)):
+        sys.exit(1)
+    sys.exit(0)
 
 
 def cmd_auto_complete_parents(file_path: str) -> None:

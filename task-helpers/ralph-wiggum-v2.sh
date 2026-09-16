@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ralph-wiggum.sh — Sequential task executor using Claude Code headless mode
+# ralph-wiggum-v2.sh — Sequential task executor using AI coding agents
 #
-# Usage: ./ralph-wiggum.sh <tasks.md> [options]
+# Usage: ./ralph-wiggum-v2.sh <tasks.md> [options]
 #
 # Expected markdown format (supports nested parent/subtask structure):
 #   ## Tasks
@@ -19,8 +19,8 @@ set -euo pipefail
 #
 # Options:
 #   --engine <claude|copilot>    Headless agent CLI to drive (default: claude)
-#   --model <model>              Model to use (default: sonnet for claude;
-#                                mapped to claude-sonnet-4.6 for copilot)
+#   --model <model>              Model to use (omitted by default so the selected
+#                                engine uses its configured/default model)
 #   --max-retries <n>            Max retries per task before giving up (default: 2)
 #   --max-budget-usd <n>         Max budget per call in USD (default: 5; claude only,
 #                                ignored for copilot which has no budget flag)
@@ -53,7 +53,7 @@ verbose() { $VERBOSE && echo -e "${CYAN}[ralph:debug]${NC} $*" >&2 || true; }
 # ── Defaults ─────────────────────────────────────────────────────────────────
 
 ENGINE="claude"
-MODEL=""              # empty = engine-specific default (see model defaulting below)
+MODEL=""              # empty = omit --model and let the engine choose
 MAX_RETRIES=2
 MAX_BUDGET_USD=5
 MAX_BUDGET_USD_DEFAULT=5
@@ -62,6 +62,14 @@ PRINT_ONLY=false
 VERBOSE=false
 SELFCORRECT=false
 SYSTEM_PROMPT_FILE=""
+TASK_SCOPE="${RALPH_TASK_SCOPE:-leaf}"
+COPILOT_SDK_PATH="${RALPH_COPILOT_SDK_PATH:-}"
+COPILOT_RUNTIME_PATH="${RALPH_COPILOT_RUNTIME_PATH:-}"
+
+if [[ "$TASK_SCOPE" != "leaf" && "$TASK_SCOPE" != "parent" ]]; then
+  err "Invalid RALPH_TASK_SCOPE '$TASK_SCOPE' (expected: leaf | parent)"
+  exit 1
+fi
 
 # ── Arg parsing ──────────────────────────────────────────────────────────────
 
@@ -108,17 +116,18 @@ if [[ ! -f "$TASKS_FILE" ]]; then
   exit 1
 fi
 
-# ── Engine validation, model defaulting & preflight ──────────────────────────
+# ── Engine validation & preflight ────────────────────────────────────────────
 
 case "$ENGINE" in
   claude)
-    : "${MODEL:=sonnet}"
     ;;
   copilot)
-    # Map the claude default to a copilot model id; explicit --model passes through.
-    : "${MODEL:=claude-sonnet-4.6}"
     if ! $PRINT_ONLY && ! command -v copilot >/dev/null 2>&1; then
       err "--engine copilot requires the 'copilot' CLI on PATH (https://docs.github.com/copilot/concepts/agents/about-copilot-cli)"
+      exit 1
+    fi
+    if ! $PRINT_ONLY && ! command -v node >/dev/null 2>&1; then
+      err "--engine copilot requires Node.js to clean up completed Copilot sessions"
       exit 1
     fi
     # Copilot CLI has no budget flag; warn if the user set one explicitly.
@@ -172,7 +181,18 @@ if [[ -n "$SYSTEM_PROMPT_FILE" && -f "$SYSTEM_PROMPT_FILE" ]]; then
   ' "$SYSTEM_PROMPT_FILE")
 
   # Override the "wait for user approval" behavior for headless mode
-  SYSTEM_PROMPT_CONTENT="$SYSTEM_PROMPT_CONTENT
+  if [[ "$TASK_SCOPE" == "parent" ]]; then
+    SYSTEM_PROMPT_CONTENT="$SYSTEM_PROMPT_CONTENT
+
+## Headless Mode Override
+You are running in HEADLESS/AUTONOMOUS mode via the ralph-wiggum task runner.
+- Do NOT wait for user approval while completing the assigned parent task.
+- Do NOT ask the user for permission — there is no interactive user.
+- Complete every incomplete subtask under the assigned parent task, marking each one [x].
+- When all subtasks are resolved, mark the assigned parent task [x] and stop.
+- Update the Relevant Files section if you create or modify files."
+  else
+    SYSTEM_PROMPT_CONTENT="$SYSTEM_PROMPT_CONTENT
 
 ## Headless Mode Override
 You are running in HEADLESS/AUTONOMOUS mode via the ralph-wiggum task runner.
@@ -181,6 +201,7 @@ You are running in HEADLESS/AUTONOMOUS mode via the ralph-wiggum task runner.
 - Complete ONLY the assigned subtask, mark it [x] in the task file, and stop.
 - If all subtasks under a parent are now [x], also mark the parent [x].
 - Update the Relevant Files section if you create or modify files."
+  fi
 fi
 
 # ── Task parsing via Python CLI ─────────────────────────────────────────────
@@ -188,6 +209,19 @@ fi
 # Get path to the Python CLI task parser (relative to this script)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TASK_PARSER="$SCRIPT_DIR/task_parser.py"
+
+# task_parser.py uses only the Python standard library. Prefer the repository's
+# uv workflow when available, but do not require uv on machines with Python.
+if command -v uv >/dev/null 2>&1; then
+  PARSER_COMMAND=(uv run)
+elif command -v python3 >/dev/null 2>&1; then
+  PARSER_COMMAND=(python3)
+elif command -v python >/dev/null 2>&1; then
+  PARSER_COMMAND=(python)
+else
+  err "task_parser.py requires uv, python3, or python on PATH"
+  exit 1
+fi
 
 # ── Parser wrapper with error handling ──────────────────────────────────────
 # Captures stderr, logs on failure, prevents set -e from killing the script.
@@ -202,10 +236,10 @@ run_parser() {
   local stderr_file
   stderr_file=$(mktemp)
 
-  verbose "run_parser: uv run task_parser.py $subcmd $*"
+  verbose "run_parser: ${PARSER_COMMAND[*]} task_parser.py $subcmd $*"
 
   # Capture stdout and stderr separately; prevent set -e from killing us
-  stdout_output=$(uv run "$TASK_PARSER" "$subcmd" "$@" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stdout_output=$("${PARSER_COMMAND[@]}" "$TASK_PARSER" "$subcmd" "$@" 2>"$stderr_file") && exit_code=0 || exit_code=$?
   stderr_output=$(<"$stderr_file")
   rm -f "$stderr_file"
 
@@ -236,6 +270,14 @@ get_next_task() {
   run_parser next-task "$TASKS_FILE"
 }
 
+# Get the next incomplete TOP-LEVEL parent task and its complete markdown block.
+# Returns:
+#   first line: start_line|end_line|parent_text
+#   remaining lines: full parent task context
+get_next_parent() {
+  run_parser next-parent "$TASKS_FILE"
+}
+
 # Mark a task as failed by line number and description (for stable addressing)
 mark_task_failed() {
   local line_num="$1"
@@ -243,11 +285,30 @@ mark_task_failed() {
   run_parser mark-failed "$TASKS_FILE" --line "$line_num" --match "$task_desc"
 }
 
+# Mark the active work item failed. Parent mode marks all remaining tasks in
+# the subtree so the parent is not selected again on the next loop iteration.
+mark_work_item_failed() {
+  local line_num="$1"
+  local task_desc="$2"
+  if [[ "$TASK_SCOPE" == "parent" ]]; then
+    run_parser mark-subtree-failed "$TASKS_FILE" --line "$line_num" --match "$task_desc"
+  else
+    mark_task_failed "$line_num" "$task_desc"
+  fi
+}
+
 # Check if a specific line is now marked complete [x]
 is_task_marked_complete() {
   local line_num="$1"
   local task_desc="$2"
   run_parser is-complete "$TASKS_FILE" --line "$line_num" --match "$task_desc"
+}
+
+# Check that every leaf task within a parent group is complete or failed.
+is_parent_task_resolved() {
+  local line_num="$1"
+  local task_desc="$2"
+  run_parser is-subtree-resolved "$TASKS_FILE" --line "$line_num" --match "$task_desc"
 }
 
 # Auto-complete parent tasks whose subtasks are all [x]
@@ -265,6 +326,152 @@ count_tasks() {
   run_parser count "$TASKS_FILE"
 }
 
+# Locate the SDK shipped with Copilot CLI. The optional environment override
+# supports standalone or nonstandard Copilot installations.
+find_copilot_sdk() {
+  if [[ -n "$COPILOT_SDK_PATH" && -f "$COPILOT_SDK_PATH" ]]; then
+    if [[ -z "$COPILOT_RUNTIME_PATH" ]]; then
+      COPILOT_RUNTIME_PATH="$(command -v copilot)"
+    fi
+    return 0
+  fi
+
+  local copilot_bin copilot_dir resolved_bin resolved_dir npm_root candidate
+  local runtime_candidate runtime_name
+  local os_name architecture package_platform cache_base
+  copilot_bin="$(command -v copilot)"
+  copilot_dir="$(dirname "$copilot_bin")"
+  resolved_bin="$(readlink -f "$copilot_bin" 2>/dev/null || true)"
+  resolved_dir=""
+  if [[ -n "$resolved_bin" ]]; then
+    resolved_dir="$(dirname "$resolved_bin")"
+  fi
+
+  os_name="$(uname -s)"
+  architecture="$(uname -m)"
+  case "$architecture" in
+    x86_64|amd64) architecture="x64" ;;
+    aarch64|arm64) architecture="arm64" ;;
+  esac
+
+  cache_base=""
+  case "$os_name" in
+    MINGW*|MSYS*|CYGWIN*)
+      package_platform="win32-$architecture"
+      runtime_name="copilot.exe"
+      if [[ -n "${LOCALAPPDATA:-}" ]]; then
+        if command -v cygpath >/dev/null 2>&1; then
+          cache_base="$(cygpath -u "$LOCALAPPDATA")/copilot/pkg/$package_platform"
+        else
+          cache_base="$LOCALAPPDATA/copilot/pkg/$package_platform"
+        fi
+      fi
+      ;;
+    Darwin)
+      package_platform="darwin-$architecture"
+      runtime_name="copilot"
+      cache_base="$HOME/Library/Caches/copilot/pkg/$package_platform"
+      ;;
+    Linux)
+      package_platform="linux-$architecture"
+      runtime_name="copilot"
+      cache_base="${XDG_CACHE_HOME:-$HOME/.cache}/copilot/pkg/$package_platform"
+      ;;
+  esac
+
+  local -a candidates=()
+  if [[ -n "$cache_base" && -d "$cache_base" ]]; then
+    local -a cached_sdks=("$cache_base"/*/copilot-sdk/index.js)
+    local index
+    for ((index=${#cached_sdks[@]} - 1; index>=0; index--)); do
+      candidates+=("${cached_sdks[$index]}")
+    done
+  fi
+
+  candidates+=(
+    "$copilot_dir/copilot-sdk/index.js"
+    "$copilot_dir/node_modules/@github/copilot/copilot-sdk/index.js"
+    "$copilot_dir/../lib/node_modules/@github/copilot/copilot-sdk/index.js"
+  )
+  if [[ -n "$resolved_dir" && "$resolved_dir" != "$copilot_dir" ]]; then
+    candidates+=(
+      "$resolved_dir/copilot-sdk/index.js"
+      "$resolved_dir/node_modules/@github/copilot/copilot-sdk/index.js"
+      "$resolved_dir/../lib/node_modules/@github/copilot/copilot-sdk/index.js"
+    )
+  fi
+  if command -v npm >/dev/null 2>&1; then
+    npm_root="$(npm root -g 2>/dev/null || true)"
+    if [[ -n "$npm_root" ]]; then
+      candidates+=("$npm_root/@github/copilot/copilot-sdk/index.js")
+      if [[ -n "${package_platform:-}" && -n "${runtime_name:-}" ]]; then
+        runtime_candidate="$npm_root/@github/copilot/node_modules/@github/copilot-$package_platform/$runtime_name"
+        if [[ -z "$COPILOT_RUNTIME_PATH" && -f "$runtime_candidate" ]]; then
+          COPILOT_RUNTIME_PATH="$(realpath "$runtime_candidate")"
+        fi
+      fi
+    fi
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -f "$candidate" ]]; then
+      COPILOT_SDK_PATH="$(realpath "$candidate")"
+      if [[ -z "$COPILOT_RUNTIME_PATH" ]]; then
+        COPILOT_RUNTIME_PATH="$resolved_bin"
+      fi
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+generate_session_id() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr '[:upper:]' '[:lower:]'
+  elif command -v uv >/dev/null 2>&1; then
+    uv run python -c 'import uuid; print(uuid.uuid4())'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import uuid; print(uuid.uuid4())'
+  elif command -v python >/dev/null 2>&1; then
+    python -c 'import uuid; print(uuid.uuid4())'
+  fi
+}
+
+delete_copilot_session() {
+  local session_id="$1"
+
+  node --input-type=module - "$COPILOT_SDK_PATH" "$session_id" "$COPILOT_RUNTIME_PATH" <<'NODE'
+import { pathToFileURL } from "node:url";
+
+const [sdkPath, sessionId, runtimePath] = process.argv.slice(2);
+const { CopilotClient, RuntimeConnection } = await import(pathToFileURL(sdkPath).href);
+const client = RuntimeConnection
+  ? new CopilotClient({
+      connection: RuntimeConnection.forStdio({ path: runtimePath }),
+    })
+  : new CopilotClient();
+
+try {
+  await client.start();
+  await client.deleteSession(sessionId);
+} finally {
+  const errors = await client.stop();
+  if (errors.length > 0) {
+    throw new AggregateError(errors, "Failed to stop the Copilot SDK client cleanly");
+  }
+}
+NODE
+}
+
+if [[ "$ENGINE" == "copilot" ]] && ! $PRINT_ONLY; then
+  if ! find_copilot_sdk; then
+    err "Could not locate Copilot CLI's copilot-sdk/index.js for session cleanup"
+    err "Set RALPH_COPILOT_SDK_PATH to the SDK entry point for a nonstandard installation"
+    exit 1
+  fi
+fi
+
 # ── Run agent headless (claude or copilot) ───────────────────────────────────
 # Both engines run the prompt non-interactively with autonomous tool use and
 # print the agent's response to stdout. The caller parses that output for the
@@ -274,6 +481,7 @@ count_tasks() {
 run_agent() {
   local prompt="$1"
   local output
+  local session_id=""
 
   if $PRINT_ONLY; then
     log "(dry run) Would send to $ENGINE:"
@@ -306,17 +514,22 @@ $prompt"
       cmd=(
         copilot
         -p "$final_prompt"
-        --model "$MODEL"
-        --allow-all-tools
-        -s
-        --no-ask-user
       )
+      session_id="$(generate_session_id)"
+      if [[ -n "$MODEL" ]]; then
+        cmd+=(--model "$MODEL")
+      fi
+      cmd+=(--session-id "$session_id" --no-remote-export --allow-all-tools -s --no-ask-user)
       ;;
     *)
       cmd=(
         claude
         -p
-        --model "$MODEL"
+      )
+      if [[ -n "$MODEL" ]]; then
+        cmd+=(--model "$MODEL")
+      fi
+      cmd+=(
         --permission-mode "$PERMISSION_MODE"
         --max-budget-usd "$MAX_BUDGET_USD"
       )
@@ -327,12 +540,24 @@ $prompt"
       ;;
   esac
 
-  output=$("${cmd[@]}" 2>&1) || {
-    local exit_code=$?
+  local exit_code=0
+  output=$("${cmd[@]}" 2>&1) || exit_code=$?
+
+  if [[ "$ENGINE" == "copilot" ]]; then
+    local cleanup_exit_code=0
+    delete_copilot_session "$session_id" || cleanup_exit_code=$?
+    if [[ $cleanup_exit_code -ne 0 ]]; then
+      err "Failed to delete completed Copilot session $session_id"
+      echo "$output"
+      return "$cleanup_exit_code"
+    fi
+  fi
+
+  if [[ $exit_code -ne 0 ]]; then
     err "$ENGINE exited with code $exit_code"
     echo "$output"
     return $exit_code
-  }
+  fi
 
   echo "$output"
   return 0
@@ -341,9 +566,14 @@ $prompt"
 # Human-readable preview of the engine invocation (for --print-only logging).
 # Avoids dumping the full prompt; shows the flag shape only.
 agent_cmdline_preview() {
+  local model_preview=""
+  if [[ -n "$MODEL" ]]; then
+    model_preview=" --model $MODEL"
+  fi
+
   case "$ENGINE" in
-    copilot) echo "copilot -p <prompt> --model $MODEL --allow-all-tools -s --no-ask-user" ;;
-    *)       echo "claude -p --model $MODEL --permission-mode $PERMISSION_MODE --max-budget-usd $MAX_BUDGET_USD ${SYSTEM_PROMPT_CONTENT:+--append-system-prompt <...> }<prompt>" ;;
+    copilot) echo "copilot -p <prompt>${model_preview} --session-id <temporary-uuid> --no-remote-export --allow-all-tools -s --no-ask-user" ;;
+    *)       echo "claude -p${model_preview} --permission-mode $PERMISSION_MODE --max-budget-usd $MAX_BUDGET_USD ${SYSTEM_PROMPT_CONTENT:+--append-system-prompt <...> }<prompt>" ;;
   esac
 }
 
@@ -417,6 +647,7 @@ As the VERY LAST line of your response, output exactly one of:
   if sc_output=$(run_agent "$selfcorrect_prompt"); then
     echo "$sc_output" > "$selfcorrect_log"
     log "Self-correct output saved to: $selfcorrect_log"
+    echo "selfcorrect ($task_desc, attempt $attempt_num) -> $selfcorrect_log" >> "$LOGS_INDEX"
 
     # Parse the result for logging
     local sc_result_line
@@ -430,6 +661,7 @@ As the VERY LAST line of your response, output exactly one of:
   else
     echo "$sc_output" > "$selfcorrect_log" 2>/dev/null || true
     warn "Self-correct call failed (non-fatal) — log: $selfcorrect_log"
+    echo "selfcorrect ($task_desc, attempt $attempt_num) -> $selfcorrect_log" >> "$LOGS_INDEX"
     return 1
   fi
 }
@@ -439,9 +671,9 @@ As the VERY LAST line of your response, output exactly one of:
 header "Ralph Wiggum Loop"
 log "Tasks file: $TASKS_FILE"
 if [[ "$ENGINE" == "copilot" ]]; then
-  log "Engine: $ENGINE | Model: $MODEL | Max retries: $MAX_RETRIES | Self-correct: $SELFCORRECT | Verbose: $VERBOSE"
+  log "Engine: $ENGINE | Model: ${MODEL:-engine default} | Task scope: $TASK_SCOPE | Max retries: $MAX_RETRIES | Self-correct: $SELFCORRECT | Verbose: $VERBOSE"
 else
-  log "Engine: $ENGINE | Model: $MODEL | Max retries: $MAX_RETRIES | Budget/call: \$$MAX_BUDGET_USD | Self-correct: $SELFCORRECT | Verbose: $VERBOSE"
+  log "Engine: $ENGINE | Model: ${MODEL:-engine default} | Task scope: $TASK_SCOPE | Max retries: $MAX_RETRIES | Budget/call: \$$MAX_BUDGET_USD | Self-correct: $SELFCORRECT | Verbose: $VERBOSE"
 fi
 if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
   log "System prompt: $SYSTEM_PROMPT_FILE"
@@ -451,8 +683,10 @@ fi
 REPO_ROOT="$(git -C "$TASKS_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$TASKS_DIR")"
 LOG_DIR="$REPO_ROOT/.ralph-logs/$(basename "$TASKS_DIR")/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG_DIR"
+LOGS_INDEX="$TASKS_DIR/ralph-logs-index.md"
 if ! $PRINT_ONLY; then
   log "Task logs: $LOG_DIR"
+  log "Logs index: $LOGS_INDEX"
 fi
 
 echo ""
@@ -461,16 +695,20 @@ task_number=0
 any_failures=false
 
 while true; do
-  # Re-read file each iteration (Claude may have modified it)
-  # Get next incomplete leaf task
-  verbose "Main loop: calling get_next_task"
-  task_info=$(get_next_task) && next_exit=0 || next_exit=$?
+  # Re-read file each iteration because the agent may have modified it.
+  if [[ "$TASK_SCOPE" == "parent" ]]; then
+    verbose "Main loop: calling get_next_parent"
+    task_info=$(get_next_parent) && next_exit=0 || next_exit=$?
+  else
+    verbose "Main loop: calling get_next_task"
+    task_info=$(get_next_task) && next_exit=0 || next_exit=$?
+  fi
 
   if [[ $next_exit -eq 1 ]]; then
     log "No more incomplete tasks — exiting loop"
     break
   elif [[ $next_exit -ne 0 ]]; then
-    err "get_next_task failed (exit $next_exit) — aborting task loop"
+    err "Failed to get next $TASK_SCOPE task (exit $next_exit) — aborting task loop"
     # Snapshot task file state for post-mortem debugging
     if [[ -d "$LOG_DIR" ]]; then
       cp "$TASKS_FILE" "$LOG_DIR/tasks_at_failure.md" 2>/dev/null || true
@@ -480,12 +718,24 @@ while true; do
     break
   fi
 
-  verbose "Main loop: get_next_task returned: $task_info"
+  line_num=""
+  parent_end_line=""
+  parent_text=""
+  parent_task_context=""
 
-  line_num="${task_info%%|*}"
-  rest="${task_info#*|}"
-  parent_text="${rest%%|*}"
-  task_desc="${rest#*|}"
+  if [[ "$TASK_SCOPE" == "parent" ]]; then
+    task_metadata="${task_info%%$'\n'*}"
+    parent_task_context="${task_info#*$'\n'}"
+    line_num="${task_metadata%%|*}"
+    rest="${task_metadata#*|}"
+    parent_end_line="${rest%%|*}"
+    task_desc="${rest#*|}"
+  else
+    line_num="${task_info%%|*}"
+    rest="${task_info#*|}"
+    parent_text="${rest%%|*}"
+    task_desc="${rest#*|}"
+  fi
   task_number=$((task_number + 1))
 
   verbose "Main loop: calling count_tasks"
@@ -498,33 +748,65 @@ while true; do
   rest2="${counts#*|}"
   completed="${rest2%%|*}"
 
-  header "Task $task_number of $total: $task_desc"
+  if [[ "$TASK_SCOPE" == "parent" ]]; then
+    header "Parent task $task_number: $task_desc"
+  else
+    header "Task $task_number of $total: $task_desc"
+  fi
   if [[ -n "$parent_text" ]]; then
     log "Parent: $parent_text"
   fi
 
   retries=0
   task_succeeded=false
+  retry_context=""
 
   while [[ $retries -le $MAX_RETRIES ]]; do
     if [[ $retries -gt 0 ]]; then
       warn "Retry $retries/$MAX_RETRIES for: $task_desc"
     fi
 
-    # Build context about the parent and sibling tasks
-    parent_context=""
-    if [[ -n "$parent_text" ]]; then
-      parent_context="
+    if [[ "$TASK_SCOPE" == "parent" ]]; then
+      prompt="You are working through a task list. The full plan is in @$TASKS_FILE — read it for broader context.
+
+Your job right now is to implement the entire following parent task, including every incomplete nested subtask:
+
+---
+$parent_task_context
+---
+$retry_context
+
+Instructions:
+1. Before starting, evaluate whether this parent task is something you can actually perform as a software engineering agent. You can write code, edit files, run commands, search codebases, and interact with development tools. You CANNOT perform physical actions, interact with the real world, access external accounts/services you have no credentials for, or do anything outside your capabilities as a coding assistant. If the parent task is not something you can perform, report BLOCKED immediately — do NOT pretend to complete it or mark it [x].
+2. Implement all incomplete subtasks in this parent task completely. Preserve already completed subtasks.
+3. Follow the task list's TDD ordering and any parent-level notes or acceptance criteria.
+4. As each subtask is completed, change its \`[ ]\` marker to \`[x]\` in the task file.
+5. When every subtask under this parent is resolved, mark the parent task \`[x]\`.
+6. Update the \"Relevant Files\" section in the task file with any files you created or modified.
+7. Do NOT work on any other parent tasks.
+
+IMPORTANT — as the VERY LAST line of your response, output exactly ONE of these status lines:
+  TASK_STATUS: COMPLETE — <one-line summary of the completed parent task>
+  TASK_STATUS: BLOCKED — <reason why you cannot complete this parent task>
+  TASK_STATUS: PARTIAL — <what you completed and which subtasks remain>
+Use BLOCKED for tasks that are impossible, nonsensical, or outside your capabilities as a software agent. Do not fabricate success.
+This status line is machine-parsed. Do not omit it."
+    else
+      # Build context about the parent and sibling tasks.
+      parent_context=""
+      if [[ -n "$parent_text" ]]; then
+        parent_context="
 This subtask belongs to the parent task group:
   $parent_text
 "
-    fi
+      fi
 
-    prompt="You are working through a task list. The full plan is in @$TASKS_FILE — read it for context.
+      prompt="You are working through a task list. The full plan is in @$TASKS_FILE — read it for context.
 $parent_context
 Your job right now is to implement ONLY the following subtask:
 
   $task_desc
+$retry_context
 
 Instructions:
 1. Before starting, evaluate whether this task is something you can actually perform as a software engineering agent. You can write code, edit files, run commands, search codebases, and interact with development tools. You CANNOT perform physical actions, interact with the real world, access external accounts/services you have no credentials for, or do anything outside your capabilities as a coding assistant. If the task is not something you can perform, report BLOCKED immediately — do NOT pretend to complete it or mark it [x].
@@ -540,6 +822,7 @@ IMPORTANT — as the VERY LAST line of your response, output exactly ONE of thes
   TASK_STATUS: PARTIAL — <what you did and what remains>
 Use BLOCKED for tasks that are impossible, nonsensical, or outside your capabilities as a software agent. Do not fabricate success.
 This status line is machine-parsed. Do not omit it."
+    fi
 
     log "Calling $ENGINE..."
     task_log="$LOG_DIR/task_$(printf '%02d' $task_number)_$(echo "$task_desc" | tr -c '[:alnum:]-' '_' | cut -c1-60).log"
@@ -548,6 +831,7 @@ This status line is machine-parsed. Do not omit it."
       # Save full output to log file
       echo "$output" > "$task_log"
       log "Full output saved to: $task_log"
+      echo "$task_desc -> $task_log" >> "$LOGS_INDEX"
 
       # Parse the TASK_STATUS line from Claude's output
       status_line=$(echo "$output" | grep -i "^TASK_STATUS:" | tail -1 || true)
@@ -563,10 +847,23 @@ This status line is machine-parsed. Do not omit it."
         status_detail="${BASH_REMATCH[2]}"
       fi
 
-      # Check the file for the [x] mark as ground truth
+      if [[ "$TASK_SCOPE" == "parent" ]]; then
+        verbose "Running auto_complete_parents before checking parent status"
+        if ! auto_complete_parents; then
+          warn "auto_complete_parents failed — parent task may need manual completion"
+        fi
+      fi
+
+      # Check the file for the [x] mark as ground truth.
       file_marked=false
       verbose "Checking if task is marked complete (line $line_num)"
-      if $PRINT_ONLY || is_task_marked_complete "$line_num" "$task_desc"; then
+      if $PRINT_ONLY; then
+        file_marked=true
+      elif [[ "$TASK_SCOPE" == "parent" ]]; then
+        if is_parent_task_resolved "$line_num" "$task_desc"; then
+          file_marked=true
+        fi
+      elif is_task_marked_complete "$line_num" "$task_desc"; then
         file_marked=true
       fi
       verbose "file_marked=$file_marked"
@@ -579,7 +876,11 @@ This status line is machine-parsed. Do not omit it."
         task_succeeded=true
 
         if $PRINT_ONLY; then
-          sed -i "${line_num}s/- \[ \?\]/- [x]/" "$TASKS_FILE"
+          if [[ "$TASK_SCOPE" == "parent" ]]; then
+            sed -i "${line_num},${parent_end_line}s/- \[ \?\]/- [x]/" "$TASKS_FILE"
+          else
+            sed -i "${line_num}s/- \[ \?\]/- [x]/" "$TASKS_FILE"
+          fi
         fi
 
         verbose "Running auto_complete_parents"
@@ -592,8 +893,8 @@ This status line is machine-parsed. Do not omit it."
         # Claude explicitly says it's blocked — mark failed and continue to next task
         err "Task blocked: $status_detail"
         echo "$output" | { grep -v "^TASK_STATUS:" || true; } | tail -10
-        if ! mark_task_failed "$line_num" "$task_desc"; then
-          warn "mark_task_failed also failed — task may not be marked [!] in file"
+        if ! mark_work_item_failed "$line_num" "$task_desc"; then
+          warn "Failed to mark task failure in the task file"
         fi
         any_failures=true
         break
@@ -606,9 +907,9 @@ This status line is machine-parsed. Do not omit it."
         if [[ $retries -gt $MAX_RETRIES ]]; then
           err "Task still incomplete after $MAX_RETRIES retries: $task_desc"
           err "Last status: $status_detail"
-          if ! mark_task_failed "$line_num" "$task_desc"; then
-          warn "mark_task_failed also failed — task may not be marked [!] in file"
-        fi
+          if ! mark_work_item_failed "$line_num" "$task_desc"; then
+            warn "Failed to mark task failure in the task file"
+          fi
           any_failures=true
           break
         fi
@@ -616,21 +917,20 @@ This status line is machine-parsed. Do not omit it."
         if $SELFCORRECT; then
           run_selfcorrect "$task_desc" "$parent_text" "$status_type" "$status_detail" "$output" "$retries" || true
         fi
-        # Add failure context to next retry prompt
-        parent_context="$parent_context
+        retry_context="
 Previous attempt reported: PARTIAL — $status_detail
 Please pick up where the previous attempt left off."
 
       elif [[ "$status_type" == "COMPLETE" ]] && ! $file_marked; then
         # Claude claims complete but didn't mark the file
-        warn "Claude reported COMPLETE but task not marked [x] in file"
+        warn "$ENGINE reported COMPLETE but task not marked [x] in file"
         echo "$output" | { grep -v "^TASK_STATUS:" || true; } | tail -10
         retries=$((retries + 1))
         if [[ $retries -gt $MAX_RETRIES ]]; then
           err "Task reported complete but never marked in file: $task_desc"
-          if ! mark_task_failed "$line_num" "$task_desc"; then
-          warn "mark_task_failed also failed — task may not be marked [!] in file"
-        fi
+          if ! mark_work_item_failed "$line_num" "$task_desc"; then
+            warn "Failed to mark task failure in the task file"
+          fi
           any_failures=true
           break
         fi
@@ -638,6 +938,9 @@ Please pick up where the previous attempt left off."
         if $SELFCORRECT; then
           run_selfcorrect "$task_desc" "$parent_text" "$status_type" "$status_detail" "$output" "$retries" || true
         fi
+        retry_context="
+The previous attempt reported COMPLETE, but the task file still contains incomplete work.
+Finish the remaining work and update every applicable checkbox."
 
       else
         # No status line or unrecognized — fall back to file check
@@ -646,9 +949,9 @@ Please pick up where the previous attempt left off."
         retries=$((retries + 1))
         if [[ $retries -gt $MAX_RETRIES ]]; then
           err "Task did not produce status after $MAX_RETRIES retries: $task_desc"
-          if ! mark_task_failed "$line_num" "$task_desc"; then
-          warn "mark_task_failed also failed — task may not be marked [!] in file"
-        fi
+          if ! mark_work_item_failed "$line_num" "$task_desc"; then
+            warn "Failed to mark task failure in the task file"
+          fi
           any_failures=true
           break
         fi
@@ -656,19 +959,23 @@ Please pick up where the previous attempt left off."
         if $SELFCORRECT; then
           run_selfcorrect "$task_desc" "$parent_text" "" "" "$output" "$retries" || true
         fi
+        retry_context="
+The previous attempt did not provide a valid TASK_STATUS line.
+Complete the assigned work and include the required status line."
       fi
 
     else
-      # Claude process crashed (non-zero exit)
+      # Agent process crashed (non-zero exit)
       exit_code=$?
       echo "$output" > "$task_log" 2>/dev/null || true
-      err "Claude crashed (exit $exit_code) — log: $task_log"
+      err "$ENGINE crashed (exit $exit_code) — log: $task_log"
+      echo "$task_desc -> $task_log" >> "$LOGS_INDEX"
       echo "$output" | tail -10
       retries=$((retries + 1))
       if [[ $retries -gt $MAX_RETRIES ]]; then
-        err "Claude crashed $MAX_RETRIES times on: $task_desc"
-        if ! mark_task_failed "$line_num" "$task_desc"; then
-          warn "mark_task_failed also failed — task may not be marked [!] in file"
+        err "$ENGINE crashed $MAX_RETRIES times on: $task_desc"
+        if ! mark_work_item_failed "$line_num" "$task_desc"; then
+          warn "Failed to mark task failure in the task file"
         fi
         any_failures=true
         break
@@ -683,15 +990,23 @@ done
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
-counts="$(count_tasks)" && true || counts="?|?|?"
-total="${counts%%|*}"
-rest="${counts#*|}"
-completed="${rest%%|*}"
-failed="${rest#*|}"
+counts="$(count_tasks)" && true || counts=""
+counts_known=false
+if [[ "$counts" =~ ^[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+  counts_known=true
+  total="${counts%%|*}"
+  rest="${counts#*|}"
+  completed="${rest%%|*}"
+  failed="${rest#*|}"
+else
+  total="?"
+  completed="?"
+  failed="?"
+fi
 
 echo ""
 header "Task Execution Summary"
-if [[ "$total" == "?" ]]; then
+if ! $counts_known; then
   log "Total: unknown (count_tasks failed) | Failures occurred: $any_failures"
 else
   log "Total: $total | Completed: $completed | Failed: $failed | Remaining: $((total - completed - failed))"
@@ -715,7 +1030,10 @@ verification="$(get_verification_section)" && true || {
 
 if [[ -z "${verification// /}" ]]; then
   warn "No verification section found in tasks file — skipping verification"
-  if [[ $failed -gt 0 ]]; then
+  if ! $counts_known; then
+    err "RESULT: INCOMPLETE — task counts and verification criteria could not be read"
+    exit 1
+  elif [[ $failed -gt 0 ]] || $any_failures; then
     err "RESULT: INCOMPLETE — $completed/$total tasks completed, $failed failed (no verification criteria defined)"
     exit 1
   else
@@ -762,6 +1080,7 @@ verify_log="$LOG_DIR/verification.log"
 if verify_output=$(run_agent "$verify_prompt"); then
   echo "$verify_output" > "$verify_log"
   log "Verification log saved to: $verify_log"
+  echo "verification -> $verify_log" >> "$LOGS_INDEX"
   echo "$verify_output" | tail -30
   echo ""
 
@@ -836,6 +1155,7 @@ Apply these steps to the feature folder containing that task file."
         fi
         echo "$complete_output" > "$complete_log"
         log "Feature completion log saved to: $complete_log"
+        echo "feature-completion -> $complete_log" >> "$LOGS_INDEX"
         echo "$complete_output" | tail -20
         ok "Feature completion finished"
       else
@@ -845,6 +1165,7 @@ Apply these steps to the feature folder containing that task file."
         fi
         echo "$complete_output" > "$complete_log" 2>/dev/null || true
         warn "Feature completion call failed (log: $complete_log)"
+        echo "feature-completion (failed) -> $complete_log" >> "$LOGS_INDEX"
         warn "All tasks passed verification — feature completion can be run manually"
       fi
 
