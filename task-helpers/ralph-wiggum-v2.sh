@@ -4,6 +4,7 @@ set -euo pipefail
 # ralph-wiggum-v2.sh — Sequential task executor using GitHub Copilot CLI
 #
 # Usage: ./ralph-wiggum-v2.sh <tasks.md> [options]
+# Requires a current Copilot CLI with the options used by the agent invocation.
 #
 # Expected markdown format (supports nested parent/subtask structure):
 #   ## Tasks
@@ -20,7 +21,7 @@ set -euo pipefail
 # Options:
 #   --model <model>              Copilot model to use (omitted by default)
 #   --max-retries <n>            Max retries per task before giving up (default: 2)
-#   --max-ai-credits <n>         Soft AI-credit cap per Copilot call (default: 30;
+#   --max-ai-credits <n>         Soft AI-credit cap per Copilot call (default: 1000;
 #                                Copilot CLI minimum: 30)
 #   --system-prompt-file <path>  Prompt file prepended to each Copilot prompt
 #   --selfcorrect, -s            On failure, make an agent call to diagnose and fix
@@ -49,7 +50,7 @@ verbose() { $VERBOSE && echo -e "${CYAN}[ralph:debug]${NC} $*" >&2 || true; }
 
 MODEL=""              # empty = omit --model and let Copilot choose
 MAX_RETRIES=2
-MAX_AI_CREDITS=30
+MAX_AI_CREDITS=1000
 PRINT_ONLY=false
 VERBOSE=false
 SELFCORRECT=false
@@ -116,6 +117,31 @@ fi
 if ! $PRINT_ONLY && ! command -v copilot >/dev/null 2>&1; then
   err "GitHub Copilot CLI is required on PATH (https://docs.github.com/copilot/how-tos/copilot-cli)"
   exit 1
+fi
+
+if ! $PRINT_ONLY; then
+  copilot_help="$(copilot --help 2>&1 || true)"
+  missing_copilot_options=()
+  required_copilot_options=(
+    --max-ai-credits
+    --session-id
+    --no-remote-export
+    --allow-all
+    --no-ask-user
+  )
+  for option in "${required_copilot_options[@]}"; do
+    if ! grep -Fq -- "$option" <<<"$copilot_help"; then
+      missing_copilot_options+=("$option")
+    fi
+  done
+
+  if [[ ${#missing_copilot_options[@]} -gt 0 ]]; then
+    copilot_version="$(copilot --version 2>&1 | head -n 1 || true)"
+    err "${copilot_version:-Installed GitHub Copilot CLI} is incompatible with Ralph"
+    err "Missing required options: ${missing_copilot_options[*]}"
+    err "Run 'copilot update' to update the CLI resolved by this shell: $(command -v copilot)"
+    exit 1
+  fi
 fi
 
 if ! $PRINT_ONLY && ! command -v node >/dev/null 2>&1; then

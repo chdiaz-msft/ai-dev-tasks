@@ -11,6 +11,20 @@ touch "$TEMP_DIR/copilot-sdk.js"
 
 cat > "$TEMP_DIR/bin/copilot" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+  cat <<'HELP'
+  --max-ai-credits <n>  Soft AI-credit cap
+  --session-id <id>     Start with a specific session ID
+  --no-remote-export    Disable remote export
+  --allow-all           Enable all permissions
+  --no-ask-user         Disable clarification prompts
+HELP
+  exit 0
+fi
+if [[ "${1:-}" == "--version" ]]; then
+  echo "GitHub Copilot CLI test"
+  exit 0
+fi
 printf '%s\n' "$@" > "$RALPH_TEST_COPILOT_ARGS"
 echo "VERIFICATION_RESULT: PASS"
 EOF
@@ -49,7 +63,7 @@ cleanup_session_id="$(grep -E '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-
 grep -qx -- "--no-remote-export" "$RALPH_TEST_COPILOT_ARGS"
 grep -qx -- "--allow-all" "$RALPH_TEST_COPILOT_ARGS"
 grep -qx -- "--max-ai-credits" "$RALPH_TEST_COPILOT_ARGS"
-grep -qx -- "30" "$RALPH_TEST_COPILOT_ARGS"
+grep -qx -- "1000" "$RALPH_TEST_COPILOT_ARGS"
 if grep -Eq -- "^--(engine|max-budget-usd|permission-mode|allow-all-tools)$" "$RALPH_TEST_COPILOT_ARGS"; then
   echo "Found a removed or superseded CLI flag in the Copilot invocation" >&2
   exit 1
