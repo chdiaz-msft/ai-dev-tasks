@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ralph-wiggum-v2.sh — Sequential task executor using AI coding agents
+# ralph-wiggum-v2.sh — Sequential task executor using GitHub Copilot CLI
 #
 # Usage: ./ralph-wiggum-v2.sh <tasks.md> [options]
 #
@@ -18,16 +18,11 @@ set -euo pipefail
 #   - [ ] Check that Y passes
 #
 # Options:
-#   --engine <claude|copilot>    Headless agent CLI to drive (default: claude)
-#   --model <model>              Model to use (omitted by default so the selected
-#                                engine uses its configured/default model)
+#   --model <model>              Copilot model to use (omitted by default)
 #   --max-retries <n>            Max retries per task before giving up (default: 2)
-#   --max-budget-usd <n>         Max budget per call in USD (default: 5; claude only,
-#                                ignored for copilot which has no budget flag)
-#   --permission-mode <mode>     Permission mode for Claude (default: auto; claude only)
-#   --system-prompt-file <path>  Prompt file injected into each call
-#                                (--append-system-prompt for claude; prepended into
-#                                the prompt text for copilot)
+#   --max-ai-credits <n>         Soft AI-credit cap per Copilot call (default: 30;
+#                                Copilot CLI minimum: 30)
+#   --system-prompt-file <path>  Prompt file prepended to each Copilot prompt
 #   --selfcorrect, -s            On failure, make an agent call to diagnose and fix
 #                                the root cause before retrying (skipped for BLOCKED)
 #   --print-only                 Dry run — print tasks without executing
@@ -52,12 +47,9 @@ verbose() { $VERBOSE && echo -e "${CYAN}[ralph:debug]${NC} $*" >&2 || true; }
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 
-ENGINE="claude"
-MODEL=""              # empty = omit --model and let the engine choose
+MODEL=""              # empty = omit --model and let Copilot choose
 MAX_RETRIES=2
-MAX_BUDGET_USD=5
-MAX_BUDGET_USD_DEFAULT=5
-PERMISSION_MODE="bypassPermissions"
+MAX_AI_CREDITS=30
 PRINT_ONLY=false
 VERBOSE=false
 SELFCORRECT=false
@@ -77,11 +69,9 @@ TASKS_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --engine)             ENGINE="$2"; shift 2 ;;
     --model)              MODEL="$2"; shift 2 ;;
     --max-retries)        MAX_RETRIES="$2"; shift 2 ;;
-    --max-budget-usd)     MAX_BUDGET_USD="$2"; shift 2 ;;
-    --permission-mode)    PERMISSION_MODE="$2"; shift 2 ;;
+    --max-ai-credits)     MAX_AI_CREDITS="$2"; shift 2 ;;
     --system-prompt-file) SYSTEM_PROMPT_FILE="$2"; shift 2 ;;
     --selfcorrect|-s)     SELFCORRECT=true; shift ;;
     --print-only)         PRINT_ONLY=true; shift ;;
@@ -116,30 +106,22 @@ if [[ ! -f "$TASKS_FILE" ]]; then
   exit 1
 fi
 
-# ── Engine validation & preflight ────────────────────────────────────────────
+# ── Copilot validation & preflight ───────────────────────────────────────────
 
-case "$ENGINE" in
-  claude)
-    ;;
-  copilot)
-    if ! $PRINT_ONLY && ! command -v copilot >/dev/null 2>&1; then
-      err "--engine copilot requires the 'copilot' CLI on PATH (https://docs.github.com/copilot/concepts/agents/about-copilot-cli)"
-      exit 1
-    fi
-    if ! $PRINT_ONLY && ! command -v node >/dev/null 2>&1; then
-      err "--engine copilot requires Node.js to clean up completed Copilot sessions"
-      exit 1
-    fi
-    # Copilot CLI has no budget flag; warn if the user set one explicitly.
-    if [[ "$MAX_BUDGET_USD" != "$MAX_BUDGET_USD_DEFAULT" ]]; then
-      warn "--max-budget-usd is ignored for --engine copilot (no budget flag in Copilot CLI)"
-    fi
-    ;;
-  *)
-    err "Invalid --engine '$ENGINE' (expected: claude | copilot)"
-    exit 1
-    ;;
-esac
+if ! [[ "$MAX_AI_CREDITS" =~ ^[0-9]+$ ]] || [[ "$MAX_AI_CREDITS" -lt 30 ]]; then
+  err "--max-ai-credits must be an integer of at least 30"
+  exit 1
+fi
+
+if ! $PRINT_ONLY && ! command -v copilot >/dev/null 2>&1; then
+  err "GitHub Copilot CLI is required on PATH (https://docs.github.com/copilot/how-tos/copilot-cli)"
+  exit 1
+fi
+
+if ! $PRINT_ONLY && ! command -v node >/dev/null 2>&1; then
+  err "Node.js is required to clean up completed Copilot sessions"
+  exit 1
+fi
 
 TASKS_FILE="$(realpath "$TASKS_FILE")"
 TASKS_DIR="$(dirname "$TASKS_FILE")"
@@ -464,7 +446,7 @@ try {
 NODE
 }
 
-if [[ "$ENGINE" == "copilot" ]] && ! $PRINT_ONLY; then
+if ! $PRINT_ONLY; then
   if ! find_copilot_sdk; then
     err "Could not locate Copilot CLI's copilot-sdk/index.js for session cleanup"
     err "Set RALPH_COPILOT_SDK_PATH to the SDK entry point for a nonstandard installation"
@@ -472,89 +454,73 @@ if [[ "$ENGINE" == "copilot" ]] && ! $PRINT_ONLY; then
   fi
 fi
 
-# ── Run agent headless (claude or copilot) ───────────────────────────────────
-# Both engines run the prompt non-interactively with autonomous tool use and
-# print the agent's response to stdout. The caller parses that output for the
+# ── Run Copilot headless ──────────────────────────────────────────────────────
+# Copilot runs the prompt non-interactively with autonomous tool use and prints
+# the agent response to stdout. The caller parses that output for the
 # TASK_STATUS:/VERIFICATION_RESULT: line and checks the task file for [x] marks,
-# which is engine-agnostic.
+# while a temporary session ID lets the runner clean up saved session state.
 
 run_agent() {
   local prompt="$1"
   local output
-  local session_id=""
+  local final_prompt="$prompt"
+  local session_id
 
   if $PRINT_ONLY; then
-    log "(dry run) Would send to $ENGINE:"
+    log "(dry run) Would send to Copilot:"
     echo ""
     echo "$prompt"
     echo ""
     if [[ -n "$SYSTEM_PROMPT_CONTENT" ]]; then
-      if [[ "$ENGINE" == "copilot" ]]; then
-        log "(dry run) With system prompt prepended into the prompt (${#SYSTEM_PROMPT_CONTENT} chars)"
-      else
-        log "(dry run) With appended system prompt (${#SYSTEM_PROMPT_CONTENT} chars)"
-      fi
+      log "(dry run) With system prompt prepended into the prompt (${#SYSTEM_PROMPT_CONTENT} chars)"
     fi
     log "(dry run) Invocation: $(agent_cmdline_preview)"
     return 0
   fi
 
-  local -a cmd
-  case "$ENGINE" in
-    copilot)
-      # Copilot CLI has no --append-system-prompt: prepend the instructions into
-      # the prompt text. -s = clean stdout for parsing; --allow-all-tools = run
-      # tools without approval; --no-ask-user = never pause for clarification.
-      local final_prompt="$prompt"
-      if [[ -n "$SYSTEM_PROMPT_CONTENT" ]]; then
-        final_prompt="$SYSTEM_PROMPT_CONTENT
+  # Copilot CLI has no system-prompt flag, so prepend the instructions to the
+  # prompt. --allow-all prevents permission prompts for tools, paths, and URLs;
+  # --no-ask-user prevents clarification prompts in this autonomous workflow.
+  if [[ -n "$SYSTEM_PROMPT_CONTENT" ]]; then
+    final_prompt="$SYSTEM_PROMPT_CONTENT
 
 $prompt"
-      fi
-      cmd=(
-        copilot
-        -p "$final_prompt"
-      )
-      session_id="$(generate_session_id)"
-      if [[ -n "$MODEL" ]]; then
-        cmd+=(--model "$MODEL")
-      fi
-      cmd+=(--session-id "$session_id" --no-remote-export --allow-all-tools -s --no-ask-user)
-      ;;
-    *)
-      cmd=(
-        claude
-        -p
-      )
-      if [[ -n "$MODEL" ]]; then
-        cmd+=(--model "$MODEL")
-      fi
-      cmd+=(
-        --permission-mode "$PERMISSION_MODE"
-        --max-budget-usd "$MAX_BUDGET_USD"
-      )
-      if [[ -n "$SYSTEM_PROMPT_CONTENT" ]]; then
-        cmd+=(--append-system-prompt "$SYSTEM_PROMPT_CONTENT")
-      fi
-      cmd+=("$prompt")
-      ;;
-  esac
+  fi
+
+  local -a cmd=(
+    copilot
+    -p "$final_prompt"
+  )
+  session_id="$(generate_session_id)"
+  if [[ -z "$session_id" ]]; then
+    err "Could not generate a temporary Copilot session ID"
+    return 1
+  fi
+  if [[ -n "$MODEL" ]]; then
+    cmd+=(--model "$MODEL")
+  fi
+  cmd+=(
+    --max-ai-credits "$MAX_AI_CREDITS"
+    --session-id "$session_id"
+    --no-remote-export
+    --allow-all
+    -s
+    --no-ask-user
+  )
 
   local exit_code=0
   output=$("${cmd[@]}" 2>&1) || exit_code=$?
 
-  if [[ "$ENGINE" == "copilot" ]]; then
-    local cleanup_exit_code=0
-    delete_copilot_session "$session_id" || cleanup_exit_code=$?
-    if [[ $cleanup_exit_code -ne 0 ]]; then
-      err "Failed to delete completed Copilot session $session_id"
-      echo "$output"
-      return "$cleanup_exit_code"
-    fi
+  local cleanup_exit_code=0
+  delete_copilot_session "$session_id" || cleanup_exit_code=$?
+  if [[ $cleanup_exit_code -ne 0 ]]; then
+    err "Failed to delete completed Copilot session $session_id"
+    echo "$output"
+    return "$cleanup_exit_code"
   fi
 
   if [[ $exit_code -ne 0 ]]; then
-    err "$ENGINE exited with code $exit_code"
+    err "Copilot exited with code $exit_code"
     echo "$output"
     return $exit_code
   fi
@@ -563,7 +529,7 @@ $prompt"
   return 0
 }
 
-# Human-readable preview of the engine invocation (for --print-only logging).
+# Human-readable preview of the Copilot invocation (for --print-only logging).
 # Avoids dumping the full prompt; shows the flag shape only.
 agent_cmdline_preview() {
   local model_preview=""
@@ -571,10 +537,7 @@ agent_cmdline_preview() {
     model_preview=" --model $MODEL"
   fi
 
-  case "$ENGINE" in
-    copilot) echo "copilot -p <prompt>${model_preview} --session-id <temporary-uuid> --no-remote-export --allow-all-tools -s --no-ask-user" ;;
-    *)       echo "claude -p${model_preview} --permission-mode $PERMISSION_MODE --max-budget-usd $MAX_BUDGET_USD ${SYSTEM_PROMPT_CONTENT:+--append-system-prompt <...> }<prompt>" ;;
-  esac
+  echo "copilot -p <prompt>${model_preview} --max-ai-credits $MAX_AI_CREDITS --session-id <temporary-uuid> --no-remote-export --allow-all -s --no-ask-user"
 }
 
 # ── Self-correction agent call ───────────────────────────────────────────────
@@ -670,11 +633,7 @@ As the VERY LAST line of your response, output exactly one of:
 
 header "Ralph Wiggum Loop"
 log "Tasks file: $TASKS_FILE"
-if [[ "$ENGINE" == "copilot" ]]; then
-  log "Engine: $ENGINE | Model: ${MODEL:-engine default} | Task scope: $TASK_SCOPE | Max retries: $MAX_RETRIES | Self-correct: $SELFCORRECT | Verbose: $VERBOSE"
-else
-  log "Engine: $ENGINE | Model: ${MODEL:-engine default} | Task scope: $TASK_SCOPE | Max retries: $MAX_RETRIES | Budget/call: \$$MAX_BUDGET_USD | Self-correct: $SELFCORRECT | Verbose: $VERBOSE"
-fi
+log "Agent: Copilot | Model: ${MODEL:-default} | Task scope: $TASK_SCOPE | Max retries: $MAX_RETRIES | Max AI credits/call: $MAX_AI_CREDITS | Self-correct: $SELFCORRECT | Verbose: $VERBOSE"
 if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
   log "System prompt: $SYSTEM_PROMPT_FILE"
 fi
@@ -824,7 +783,7 @@ Use BLOCKED for tasks that are impossible, nonsensical, or outside your capabili
 This status line is machine-parsed. Do not omit it."
     fi
 
-    log "Calling $ENGINE..."
+    log "Calling Copilot..."
     task_log="$LOG_DIR/task_$(printf '%02d' $task_number)_$(echo "$task_desc" | tr -c '[:alnum:]-' '_' | cut -c1-60).log"
 
     if output=$(run_agent "$prompt"); then
@@ -833,7 +792,7 @@ This status line is machine-parsed. Do not omit it."
       log "Full output saved to: $task_log"
       echo "$task_desc -> $task_log" >> "$LOGS_INDEX"
 
-      # Parse the TASK_STATUS line from Claude's output
+      # Parse the TASK_STATUS line from Copilot's output
       status_line=$(echo "$output" | grep -i "^TASK_STATUS:" | tail -1 || true)
 
       status_type=""
@@ -890,7 +849,7 @@ This status line is machine-parsed. Do not omit it."
         break
 
       elif [[ "$status_type" == "BLOCKED" ]]; then
-        # Claude explicitly says it's blocked — mark failed and continue to next task
+        # Copilot explicitly says it's blocked — mark failed and continue to next task
         err "Task blocked: $status_detail"
         echo "$output" | { grep -v "^TASK_STATUS:" || true; } | tail -10
         if ! mark_work_item_failed "$line_num" "$task_desc"; then
@@ -900,7 +859,7 @@ This status line is machine-parsed. Do not omit it."
         break
 
       elif [[ "$status_type" == "PARTIAL" ]]; then
-        # Claude made progress but didn't finish — retry with context
+        # Copilot made progress but didn't finish — retry with context
         warn "Task partial: $status_detail"
         echo "$output" | { grep -v "^TASK_STATUS:" || true; } | tail -10
         retries=$((retries + 1))
@@ -922,8 +881,8 @@ Previous attempt reported: PARTIAL — $status_detail
 Please pick up where the previous attempt left off."
 
       elif [[ "$status_type" == "COMPLETE" ]] && ! $file_marked; then
-        # Claude claims complete but didn't mark the file
-        warn "$ENGINE reported COMPLETE but task not marked [x] in file"
+        # Copilot claims complete but didn't mark the file
+        warn "Copilot reported COMPLETE but task not marked [x] in file"
         echo "$output" | { grep -v "^TASK_STATUS:" || true; } | tail -10
         retries=$((retries + 1))
         if [[ $retries -gt $MAX_RETRIES ]]; then
@@ -968,12 +927,12 @@ Complete the assigned work and include the required status line."
       # Agent process crashed (non-zero exit)
       exit_code=$?
       echo "$output" > "$task_log" 2>/dev/null || true
-      err "$ENGINE crashed (exit $exit_code) — log: $task_log"
+      err "Copilot crashed (exit $exit_code) — log: $task_log"
       echo "$task_desc -> $task_log" >> "$LOGS_INDEX"
       echo "$output" | tail -10
       retries=$((retries + 1))
       if [[ $retries -gt $MAX_RETRIES ]]; then
-        err "$ENGINE crashed $MAX_RETRIES times on: $task_desc"
+        err "Copilot crashed $MAX_RETRIES times on: $task_desc"
         if ! mark_work_item_failed "$line_num" "$task_desc"; then
           warn "Failed to mark task failure in the task file"
         fi
@@ -1176,11 +1135,11 @@ Apply these steps to the feature folder containing that task file."
     err "$result_line"
     exit 1
   else
-    warn "RESULT: Could not parse verification result from Claude output"
+    warn "RESULT: Could not parse verification result from Copilot output"
     warn "Review the output above manually (log: $verify_log)"
     exit 2
   fi
 else
-  err "RESULT: Verification call to Claude failed (log: $verify_log)"
+  err "RESULT: Verification call to Copilot failed (log: $verify_log)"
   exit 1
 fi

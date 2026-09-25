@@ -21,6 +21,14 @@ TASK_HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RALPH_V2="$TASK_HELPERS_DIR/ralph-wiggum-v2.sh"
 TASK_PARSER="$TASK_HELPERS_DIR/task_parser.py"
 
+if command -v uv >/dev/null 2>&1; then
+    PYTHON_COMMAND=(uv run python)
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_COMMAND=(python3)
+else
+    PYTHON_COMMAND=(python)
+fi
+
 # Test helpers
 pass() {
     echo -e "${GREEN}✓${NC} $1"
@@ -82,9 +90,9 @@ trap 'rm -rf "$TEMP_DIR"' EXIT
 TEST_FILE="$TEMP_DIR/test_tasks.md"
 create_test_task_file "$TEST_FILE"
 
-# Check if v2 script contains call to task_parser.py next-task
+# Check if v2 script delegates next-task to the parser wrapper
 if [[ -f "$RALPH_V2" ]]; then
-    if grep -q "task_parser.py.*next-task" "$RALPH_V2" || grep -q "task_parser.py next-task" "$RALPH_V2"; then
+    if grep -q 'run_parser next-task' "$RALPH_V2"; then
         pass "v2 script contains Python CLI call for next-task"
     else
         fail "v2 script does not contain Python CLI call for next-task"
@@ -96,7 +104,7 @@ fi
 # Test 4: Verify ralph-wiggum-v2.sh calls Python CLI for count
 test_start "v2 script calls Python CLI for count operation"
 if [[ -f "$RALPH_V2" ]]; then
-    if grep -q "task_parser.py.*count" "$RALPH_V2" || grep -q "task_parser.py count" "$RALPH_V2"; then
+    if grep -q 'run_parser count' "$RALPH_V2"; then
         pass "v2 script contains Python CLI call for count"
     else
         fail "v2 script does not contain Python CLI call for count"
@@ -108,7 +116,7 @@ fi
 # Test 5: Verify ralph-wiggum-v2.sh calls Python CLI for is-complete
 test_start "v2 script calls Python CLI for is-complete operation"
 if [[ -f "$RALPH_V2" ]]; then
-    if grep -q "task_parser.py.*is-complete" "$RALPH_V2" || grep -q "task_parser.py is-complete" "$RALPH_V2"; then
+    if grep -q 'run_parser is-complete' "$RALPH_V2"; then
         pass "v2 script contains Python CLI call for is-complete"
     else
         fail "v2 script does not contain Python CLI call for is-complete"
@@ -120,7 +128,7 @@ fi
 # Test 6: Verify ralph-wiggum-v2.sh calls Python CLI for mark-failed
 test_start "v2 script calls Python CLI for mark-failed operation"
 if [[ -f "$RALPH_V2" ]]; then
-    if grep -q "task_parser.py.*mark-failed" "$RALPH_V2" || grep -q "task_parser.py mark-failed" "$RALPH_V2"; then
+    if grep -q 'run_parser mark-failed' "$RALPH_V2"; then
         pass "v2 script contains Python CLI call for mark-failed"
     else
         fail "v2 script does not contain Python CLI call for mark-failed"
@@ -132,7 +140,7 @@ fi
 # Test 7: Verify ralph-wiggum-v2.sh calls Python CLI for auto-complete-parents
 test_start "v2 script calls Python CLI for auto-complete-parents operation"
 if [[ -f "$RALPH_V2" ]]; then
-    if grep -q "task_parser.py.*auto-complete-parents" "$RALPH_V2" || grep -q "task_parser.py auto-complete-parents" "$RALPH_V2"; then
+    if grep -q 'run_parser auto-complete-parents' "$RALPH_V2"; then
         pass "v2 script contains Python CLI call for auto-complete-parents"
     else
         fail "v2 script does not contain Python CLI call for auto-complete-parents"
@@ -144,7 +152,7 @@ fi
 # Test 8: Verify ralph-wiggum-v2.sh calls Python CLI for verification-section
 test_start "v2 script calls Python CLI for verification-section operation"
 if [[ -f "$RALPH_V2" ]]; then
-    if grep -q "task_parser.py.*verification-section" "$RALPH_V2" || grep -q "task_parser.py verification-section" "$RALPH_V2"; then
+    if grep -q 'run_parser verification-section' "$RALPH_V2"; then
         pass "v2 script contains Python CLI call for verification-section"
     else
         fail "v2 script does not contain Python CLI call for verification-section"
@@ -186,7 +194,7 @@ fi
 # Test 11: Functional test - verify Python CLI next-task works
 test_start "Python CLI next-task command returns expected format"
 create_test_task_file "$TEST_FILE"
-output=$(python "$TASK_PARSER" next-task "$TEST_FILE" 2>&1 || true)
+output=$("${PYTHON_COMMAND[@]}" "$TASK_PARSER" next-task "$TEST_FILE" 2>&1 || true)
 # Expected format: line_num|parent_text|task_text
 if [[ "$output" =~ ^[0-9]+\|.*\|.* ]]; then
     pass "Python CLI next-task returns pipe-delimited format"
@@ -196,7 +204,7 @@ fi
 
 # Test 12: Functional test - verify Python CLI count works
 test_start "Python CLI count command returns expected format"
-output=$(python "$TASK_PARSER" count "$TEST_FILE" 2>&1 || true)
+output=$("${PYTHON_COMMAND[@]}" "$TASK_PARSER" count "$TEST_FILE" 2>&1 || true)
 # Expected format: total|completed|failed
 if [[ "$output" =~ ^[0-9]+\|[0-9]+\|[0-9]+ ]]; then
     pass "Python CLI count returns pipe-delimited format"
@@ -206,7 +214,7 @@ fi
 
 # Test 13: Functional test - verify Python CLI verification-section works
 test_start "Python CLI verification-section command extracts content"
-output=$(python "$TASK_PARSER" verification-section "$TEST_FILE" 2>&1 || true)
+output=$("${PYTHON_COMMAND[@]}" "$TASK_PARSER" verification-section "$TEST_FILE" 2>&1 || true)
 if [[ "$output" == *"All tests pass"* ]]; then
     pass "Python CLI verification-section extracts content correctly"
 else
@@ -216,7 +224,7 @@ fi
 # Test 14: Functional test - verify Python CLI is-complete works
 test_start "Python CLI is-complete command checks task status"
 # Line 7 is "- [ ] 1.1 First subtask" which is incomplete
-if python "$TASK_PARSER" is-complete "$TEST_FILE" --line 7 --match "First subtask" >/dev/null 2>&1; then
+if "${PYTHON_COMMAND[@]}" "$TASK_PARSER" is-complete "$TEST_FILE" --line 7 --match "First subtask" >/dev/null 2>&1; then
     fail "Python CLI is-complete returned 0 for incomplete task (expected 1)"
 else
     exit_code=$?
@@ -230,9 +238,9 @@ fi
 # Test 15: Functional test - verify Python CLI mark-complete and is-complete work together
 test_start "Python CLI mark-complete and is-complete work together"
 # Mark the task complete
-if python "$TASK_PARSER" mark-complete "$TEST_FILE" --line 7 --match "First subtask" >/dev/null 2>&1; then
+if "${PYTHON_COMMAND[@]}" "$TASK_PARSER" mark-complete "$TEST_FILE" --line 7 --match "First subtask" >/dev/null 2>&1; then
     # Now check if it's complete
-    if python "$TASK_PARSER" is-complete "$TEST_FILE" --line 7 --match "First subtask" >/dev/null 2>&1; then
+    if "${PYTHON_COMMAND[@]}" "$TASK_PARSER" is-complete "$TEST_FILE" --line 7 --match "First subtask" >/dev/null 2>&1; then
         pass "Python CLI mark-complete successfully marks task and is-complete detects it"
     else
         fail "Python CLI mark-complete/is-complete interaction failed: task not marked complete"

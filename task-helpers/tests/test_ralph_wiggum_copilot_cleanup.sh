@@ -39,8 +39,7 @@ export RALPH_TEST_NODE_STDIN="$TEMP_DIR/node-stdin.js"
 export RALPH_COPILOT_SDK_PATH="$TEMP_DIR/copilot-sdk.js"
 
 PATH="$TEMP_DIR/bin:$PATH" bash "$RALPH_V2" \
-  "$TEMP_DIR/work/tasks.md" \
-  --engine copilot >/dev/null
+  "$TEMP_DIR/work/tasks.md" >/dev/null
 
 session_id="$(awk '/^--session-id$/{getline; print; exit}' "$RALPH_TEST_COPILOT_ARGS")"
 cleanup_session_id="$(grep -E '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' "$RALPH_TEST_NODE_ARGS")"
@@ -48,6 +47,13 @@ cleanup_session_id="$(grep -E '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-
 [[ "$session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
 [[ "$cleanup_session_id" == "$session_id" ]]
 grep -qx -- "--no-remote-export" "$RALPH_TEST_COPILOT_ARGS"
+grep -qx -- "--allow-all" "$RALPH_TEST_COPILOT_ARGS"
+grep -qx -- "--max-ai-credits" "$RALPH_TEST_COPILOT_ARGS"
+grep -qx -- "30" "$RALPH_TEST_COPILOT_ARGS"
+if grep -Eq -- "^--(engine|max-budget-usd|permission-mode|allow-all-tools)$" "$RALPH_TEST_COPILOT_ARGS"; then
+  echo "Found a removed or superseded CLI flag in the Copilot invocation" >&2
+  exit 1
+fi
 grep -q "client.deleteSession(sessionId)" "$RALPH_TEST_NODE_STDIN"
 
 echo "Copilot session cleanup integration test passed"

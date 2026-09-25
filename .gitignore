@@ -1,4 +1,8 @@
-tasks/
+tasks/*
+!tasks/local-issue-runner/
+tasks/local-issue-runner/*
+!tasks/local-issue-runner/spec.md
+!tasks/local-issue-runner/existing-tools-research.md
 .ralph-logs/
 __pycache__/
 *.pyc

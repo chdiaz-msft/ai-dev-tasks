@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This repository is a **prompt and tooling collection** for structured AI-assisted feature development. It provides markdown prompt files that guide AI coding assistants through a PRD → Task List → Implementation workflow using TDD. It also includes `ralph-wiggum`, a bash-based automation harness that executes task lists sequentially via Claude Code headless mode.
+This repository is a **prompt and tooling collection** for structured AI-assisted feature development. It provides markdown prompt files that guide AI coding assistants through a PRD → Task List → Implementation workflow using TDD. It also includes `ralph-wiggum`, a bash-based automation harness that executes task lists sequentially via GitHub Copilot CLI prompt mode.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ Three core prompt files drive the workflow. They use Claude's frontmatter format
 
 ### Task Execution (`task-helpers/`)
 
-- `ralph-wiggum-v2.sh` — Bash script that reads a markdown task file and executes each task via Claude Code headless mode. Supports `--model`, `--max-retries`, `--max-budget-usd`, `--print-only`, and `--verbose` flags.
+- `ralph-wiggum-v2.sh` — Bash script that reads a markdown task file and executes each task via GitHub Copilot CLI prompt mode. Supports `--model`, `--max-retries`, `--max-ai-credits`, `--system-prompt-file`, `--selfcorrect`, `--print-only`, and `--verbose` flags.
 - `task_parser.py` — Python CLI that parses markdown checkbox task files. Replaces fragile bash parsing with robust regex-based extraction. Zero external dependencies (stdlib only, Python ≥3.9).
 - `process-task-list.prompt.md` — Prompt governing how AI works through tasks one sub-task at a time, using `[ ]`, `[x]`, and `[!]` markers.
 

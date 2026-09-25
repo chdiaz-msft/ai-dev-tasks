@@ -43,8 +43,14 @@ fi
 explicit_model_output="$(
   "$RALPH_PARENT_TASKS" "$TASK_FILE" \
     --print-only \
-    --engine copilot \
-    --model test-model
+    --model test-model \
+    --max-ai-credits 45
 )"
 
 grep -q -- "--model test-model" <<<"$explicit_model_output"
+grep -q -- "--max-ai-credits 45" <<<"$explicit_model_output"
+
+if grep -qi "claude" "$RALPH_PARENT_TASKS" "$TASK_HELPERS_DIR/ralph-wiggum-v2.sh"; then
+  echo "Ralph scripts must not contain Claude-specific behavior" >&2
+  exit 1
+fi
