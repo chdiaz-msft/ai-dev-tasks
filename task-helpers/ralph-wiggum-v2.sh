@@ -21,8 +21,10 @@ set -euo pipefail
 # Options:
 #   --model <model>              Copilot model to use (omitted by default)
 #   --max-retries <n>            Max retries per task before giving up (default: 2)
-#   --max-ai-credits <n>         Soft AI-credit cap per Copilot call (default: 1000;
+#   --max-ai-credits <n>         Soft AI-credit cap per Copilot call (default: 2000;
 #                                Copilot CLI minimum: 30)
+#   --max-tasks <n>              Stop after attempting n tasks (default: unlimited;
+#                                skips verification when the limit is reached)
 #   --system-prompt-file <path>  Prompt file prepended to each Copilot prompt
 #   --selfcorrect, -s            On failure, make an agent call to diagnose and fix
 #                                the root cause before retrying (skipped for BLOCKED)
@@ -50,7 +52,8 @@ verbose() { $VERBOSE && echo -e "${CYAN}[ralph:debug]${NC} $*" >&2 || true; }
 
 MODEL=""              # empty = omit --model and let Copilot choose
 MAX_RETRIES=2
-MAX_AI_CREDITS=1000
+MAX_AI_CREDITS=2000
+MAX_TASKS=""
 PRINT_ONLY=false
 VERBOSE=false
 SELFCORRECT=false
@@ -73,6 +76,7 @@ while [[ $# -gt 0 ]]; do
     --model)              MODEL="$2"; shift 2 ;;
     --max-retries)        MAX_RETRIES="$2"; shift 2 ;;
     --max-ai-credits)     MAX_AI_CREDITS="$2"; shift 2 ;;
+    --max-tasks)          MAX_TASKS="$2"; shift 2 ;;
     --system-prompt-file) SYSTEM_PROMPT_FILE="$2"; shift 2 ;;
     --selfcorrect|-s)     SELFCORRECT=true; shift ;;
     --print-only)         PRINT_ONLY=true; shift ;;
@@ -111,6 +115,11 @@ fi
 
 if ! [[ "$MAX_AI_CREDITS" =~ ^[0-9]+$ ]] || [[ "$MAX_AI_CREDITS" -lt 30 ]]; then
   err "--max-ai-credits must be an integer of at least 30"
+  exit 1
+fi
+
+if [[ -n "$MAX_TASKS" ]] && { ! [[ "$MAX_TASKS" =~ ^[0-9]+$ ]] || [[ "$MAX_TASKS" -lt 1 ]]; }; then
+  err "--max-tasks must be a positive integer"
   exit 1
 fi
 
@@ -446,7 +455,7 @@ generate_session_id() {
   fi
 }
 
-delete_copilot_session() {
+collect_usage_and_delete_copilot_session() {
   local session_id="$1"
 
   node --input-type=module - "$COPILOT_SDK_PATH" "$session_id" "$COPILOT_RUNTIME_PATH" <<'NODE'
@@ -460,8 +469,50 @@ const client = RuntimeConnection
     })
   : new CopilotClient();
 
+const formatNumber = (value) => {
+  if (!Number.isFinite(value)) {
+    return "unavailable";
+  }
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(6)));
+};
+
 try {
   await client.start();
+  try {
+    const session = await client.resumeSession(sessionId, {});
+    try {
+      const metrics = await session.rpc.usage.getMetrics();
+      const modelMetrics = Object.values(metrics.modelMetrics ?? {}).filter(Boolean);
+      const inputTokens = modelMetrics.reduce(
+        (total, metric) => total + metric.usage.inputTokens,
+        0,
+      );
+      const outputTokens = modelMetrics.reduce(
+        (total, metric) => total + metric.usage.outputTokens,
+        0,
+      );
+      const aiCredits = metrics.totalNanoAiu === undefined
+        ? Number.NaN
+        : metrics.totalNanoAiu / 1e9;
+      console.log(
+        `RALPH_SESSION_USAGE: session_id=${sessionId}`
+        + ` ai_credits=${formatNumber(aiCredits)}`
+        + ` premium_request_cost=${formatNumber(metrics.totalPremiumRequestCost)}`
+        + ` user_requests=${metrics.totalUserRequests}`
+        + ` input_tokens=${inputTokens}`
+        + ` output_tokens=${outputTokens}`
+        + ` api_duration_ms=${metrics.totalApiDurationMs}`,
+      );
+    } finally {
+      await session.disconnect();
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.name : "UnknownError";
+    console.log(
+      `RALPH_SESSION_USAGE: session_id=${sessionId}`
+      + ` ai_credits=unavailable reason=${reason}`,
+    );
+  }
   await client.deleteSession(sessionId);
 } finally {
   const errors = await client.stop();
@@ -538,20 +589,33 @@ $prompt"
   output=$("${cmd[@]}" 2>&1) || exit_code=$?
 
   local cleanup_exit_code=0
-  delete_copilot_session "$session_id" || cleanup_exit_code=$?
+  local session_usage=""
+  session_usage=$(collect_usage_and_delete_copilot_session "$session_id") || cleanup_exit_code=$?
+  if [[ -n "$session_usage" && -n "${SESSION_USAGE_LOG:-}" ]]; then
+    printf '%s\n' "$session_usage" >> "$SESSION_USAGE_LOG"
+  fi
   if [[ $cleanup_exit_code -ne 0 ]]; then
     err "Failed to delete completed Copilot session $session_id"
     echo "$output"
+    if [[ -n "$session_usage" ]]; then
+      echo "$session_usage"
+    fi
     return "$cleanup_exit_code"
   fi
 
   if [[ $exit_code -ne 0 ]]; then
     err "Copilot exited with code $exit_code"
     echo "$output"
+    if [[ -n "$session_usage" ]]; then
+      echo "$session_usage"
+    fi
     return $exit_code
   fi
 
   echo "$output"
+  if [[ -n "$session_usage" ]]; then
+    echo "$session_usage"
+  fi
   return 0
 }
 
@@ -659,7 +723,7 @@ As the VERY LAST line of your response, output exactly one of:
 
 header "Ralph Wiggum Loop"
 log "Tasks file: $TASKS_FILE"
-log "Agent: Copilot | Model: ${MODEL:-default} | Task scope: $TASK_SCOPE | Max retries: $MAX_RETRIES | Max AI credits/call: $MAX_AI_CREDITS | Self-correct: $SELFCORRECT | Verbose: $VERBOSE"
+log "Agent: Copilot | Model: ${MODEL:-default} | Task scope: $TASK_SCOPE | Max retries: $MAX_RETRIES | Max AI credits/call: $MAX_AI_CREDITS | Max tasks: ${MAX_TASKS:-unlimited} | Self-correct: $SELFCORRECT | Verbose: $VERBOSE"
 if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
   log "System prompt: $SYSTEM_PROMPT_FILE"
 fi
@@ -669,15 +733,20 @@ REPO_ROOT="$(git -C "$TASKS_DIR" rev-parse --show-toplevel 2>/dev/null || echo "
 LOG_DIR="$REPO_ROOT/.ralph-logs/$(basename "$TASKS_DIR")/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG_DIR"
 LOGS_INDEX="$TASKS_DIR/ralph-logs-index.md"
+SESSION_USAGE_LOG="$LOG_DIR/session-usage.log"
 if ! $PRINT_ONLY; then
+  : > "$SESSION_USAGE_LOG"
+  echo "session-usage -> $SESSION_USAGE_LOG" >> "$LOGS_INDEX"
   log "Task logs: $LOG_DIR"
   log "Logs index: $LOGS_INDEX"
+  log "Session usage: $SESSION_USAGE_LOG"
 fi
 
 echo ""
 
 task_number=0
 any_failures=false
+task_limit_reached=false
 
 while true; do
   # Re-read file each iteration because the agent may have modified it.
@@ -700,6 +769,12 @@ while true; do
       err "Task file snapshot saved to: $LOG_DIR/tasks_at_failure.md"
     fi
     any_failures=true
+    break
+  fi
+
+  if [[ -n "$MAX_TASKS" && $task_number -ge $MAX_TASKS ]]; then
+    log "Task limit reached after $task_number attempted tasks — stopping execution"
+    task_limit_reached=true
     break
   fi
 
@@ -992,9 +1067,9 @@ fi
 echo ""
 header "Task Execution Summary"
 if ! $counts_known; then
-  log "Total: unknown (count_tasks failed) | Failures occurred: $any_failures"
+  log "Attempted: $task_number | Total: unknown (count_tasks failed) | Failures occurred: $any_failures"
 else
-  log "Total: $total | Completed: $completed | Failed: $failed | Remaining: $((total - completed - failed))"
+  log "Attempted: $task_number | Total: $total | Completed: $completed | Failed: $failed | Remaining: $((total - completed - failed))"
 fi
 if ! $PRINT_ONLY; then
   log "Logs: $LOG_DIR"
@@ -1002,6 +1077,14 @@ fi
 
 if $any_failures; then
   warn "Some tasks failed or were blocked (see above)"
+fi
+
+if $task_limit_reached; then
+  log "Skipping verification because the task limit was reached"
+  if $any_failures; then
+    exit 1
+  fi
+  exit 0
 fi
 
 # ── Verification ─────────────────────────────────────────────────────────────

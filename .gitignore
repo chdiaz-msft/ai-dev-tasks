@@ -1,3 +1,4 @@
 .ralph-logs/
+ralph-logs-index.md
 __pycache__/
 *.pyc

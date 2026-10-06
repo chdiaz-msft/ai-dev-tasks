@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jacob-ai-dev-tasks/local_issue_runner/schemas/parent_issue_validation.schema.json",
+  "title": "Local Issue Runner Parent Issue Validation Report",
+  "description": "Version 1 of the read-only parent issue structure validation report.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "issue_url",
+    "repository",
+    "parent",
+    "children",
+    "ready_issues",
+    "valid",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "issue_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://github\\.com/[^/]+/[^/]+/issues/[1-9][0-9]*$"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[^/]+/[^/]+$"
+    },
+    "parent": {
+      "$ref": "#/$defs/issue"
+    },
+    "children": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "number",
+          "title",
+          "state",
+          "prerequisite_issue_numbers"
+        ],
+        "properties": {
+          "number": {
+            "$ref": "#/$defs/issueNumber"
+          },
+          "title": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "OPEN",
+              "CLOSED"
+            ]
+          },
+          "prerequisite_issue_numbers": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/issueNumber"
+            }
+          }
+        }
+      }
+    },
+    "ready_issues": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/issueNumber"
+      }
+    },
+    "valid": {
+      "type": "boolean"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    }
+  },
+  "$defs": {
+    "issueNumber": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "title",
+        "state"
+      ],
+      "properties": {
+        "number": {
+          "$ref": "#/$defs/issueNumber"
+        },
+        "title": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "OPEN",
+            "CLOSED"
+          ]
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "message",
+        "issue_numbers",
+        "suggestion"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "severity": {
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "issue_numbers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/issueNumber"
+          }
+        },
+        "suggestion": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
